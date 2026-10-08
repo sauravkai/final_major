@@ -1,6 +1,6 @@
 import React, { useMemo, useEffect, useState } from 'react';
 import API from '../../services/api';
-import { getCanonicalSolvedCount } from '../../utils/dashboardStats';
+import { dedupeSolvedHistory, getCanonicalSolvedCount } from '../../utils/dashboardStats';
 import {
   ResponsiveContainer,
   LineChart,
@@ -100,7 +100,7 @@ export default function StatsCharts({ user = {}, interviews: propInterviews = []
             }
           })();
 
-          const merged = [...localHistory, ...accepted].filter((entry) => entry?.date && entry?.problemTitle);
+          const merged = dedupeSolvedHistory([...localHistory, ...accepted].filter((entry) => entry?.date && entry?.problemTitle));
           if (merged.length > 0) {
             localStorage.setItem('solvedQuestionHistory', JSON.stringify(merged));
             setSolvedHistory(merged);
@@ -151,11 +151,34 @@ export default function StatsCharts({ user = {}, interviews: propInterviews = []
     return months.map((month) => ({ month, value: counts[month] || 0 }));
   }, [months, solvedHistory, solvedCount]);
 
+  const savedInterviewReports = useMemo(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('previousInterviewReports') || '[]');
+      return Array.isArray(raw) ? raw : [];
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const completedInterviewRecords = useMemo(() => {
+    const merged = [...(Array.isArray(interviews) ? interviews : []), ...savedInterviewReports];
+    return merged.filter((entry) => {
+      if (!entry) return false;
+      const status = String(entry?.status || entry?.state || '').trim().toLowerCase();
+      const hasCompletedMarker = ['completed', 'finished'].includes(status);
+      const hasHistoricDate = !!(entry?.completedDate || entry?.interviewDate || entry?.endedAt || entry?.scheduledAt || entry?.completedAt || entry?.createdAt || entry?.startedAt || entry?.time);
+      if (hasCompletedMarker) return true;
+      return hasHistoricDate && (status === '' || status === 'scheduled');
+    });
+  }, [interviews, savedInterviewReports]);
+
+  const completedInterviewCount = completedInterviewRecords.length || Number(user?.stats?.interviewsCompleted || 0);
+
   const derivedInterviewSeries = useMemo(() => {
     const counts = Object.fromEntries(months.map((month) => [month, 0]));
 
-    for (const entry of interviews) {
-      const dateSource = entry?.scheduledAt || entry?.createdAt || entry?.startedAt || entry?.endedAt || entry?.time;
+    for (const entry of completedInterviewRecords) {
+      const dateSource = entry?.completedDate || entry?.interviewDate || entry?.endedAt || entry?.scheduledAt || entry?.completedAt || entry?.createdAt || entry?.startedAt || entry?.time;
       const date = dateSource ? new Date(dateSource) : null;
       if (!date || Number.isNaN(date.getTime())) continue;
 
@@ -165,23 +188,32 @@ export default function StatsCharts({ user = {}, interviews: propInterviews = []
       }
     }
 
+    if (completedInterviewCount > 0 && Object.values(counts).every((value) => value === 0)) {
+      const lastMonth = months[months.length - 1];
+      counts[lastMonth] = completedInterviewCount;
+    }
+
     return months.map((month) => ({ month, value: counts[month] || 0 }));
-  }, [interviews, months]);
+  }, [completedInterviewCount, completedInterviewRecords, months]);
 
   const ivSeries = interviewsByMonth.length ? interviewsByMonth : derivedInterviewSeries;
   const pbSeries = hasMeaningfulProblemData ? problemsByMonth : fallbackProblemSeries;
   const pieSeries = statusPie.length
     ? statusPie
-    : (propInterviews.length
-      ? (() => {
-          const counts = { scheduled: 0, 'in-progress': 0, completed: 0, cancelled: 0 };
-          propInterviews.forEach((it) => {
-            const s = (it.status || 'scheduled').toLowerCase();
-            if (counts[s] !== undefined) counts[s]++;
-          });
-          return Object.keys(counts).map((k, i) => ({ name: k, value: counts[k], color: COLORS[i % COLORS.length] }));
-        })()
-      : []);
+    : (() => {
+        const counts = { scheduled: 0, 'in-progress': 0, completed: 0, cancelled: 0 };
+        const allInterviewItems = [...(Array.isArray(interviews) ? interviews : []), ...savedInterviewReports];
+
+        allInterviewItems.forEach((it) => {
+          if (!it) return;
+          const s = String(it.status || it.state || 'scheduled').trim().toLowerCase();
+          const isCompleted = ['completed', 'finished'].includes(s) || !!(it.completedDate || it.interviewDate || it.endedAt || it.completedAt);
+          const key = isCompleted ? 'completed' : (['cancelled', 'ended', 'closed'].includes(s) ? 'cancelled' : (['in-progress', 'live'].includes(s) ? 'in-progress' : 'scheduled'));
+          if (counts[key] !== undefined) counts[key] += 1;
+        });
+
+        return Object.entries(counts).map(([k, v], i) => ({ name: k, value: v, color: COLORS[i % COLORS.length] }));
+      })();
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
@@ -189,12 +221,27 @@ export default function StatsCharts({ user = {}, interviews: propInterviews = []
         <div className="text-sm text-slate-500">Interviews (last 6 months)</div>
         <div className="h-48 mt-2">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={ivSeries} margin={{ top: 6, right: 12, left: -8, bottom: 6 }}>
+            <LineChart data={ivSeries} margin={{ top: 12, right: 12, left: -8, bottom: 6 }}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="month" tick={{ fontSize: 12 }} />
               <YAxis allowDecimals={false} />
               <Tooltip />
-              <Line type="monotone" dataKey="value" stroke="#6366F1" strokeWidth={3} dot={{ r: 3 }} />
+              <Line
+                type="monotone"
+                dataKey="value"
+                stroke="#6366F1"
+                strokeWidth={3}
+                dot={{ r: 4, strokeWidth: 2, fill: '#fff' }}
+                activeDot={{ r: 6 }}
+                label={({ x, y, value, index }) => {
+                  if (Number(value) === 0) return null;
+                  return (
+                    <text x={x} y={y - 8} textAnchor="middle" fontSize={10} fill="#4F46E5" fontWeight={700}>
+                      {value}
+                    </text>
+                  );
+                }}
+              />
             </LineChart>
           </ResponsiveContainer>
         </div>

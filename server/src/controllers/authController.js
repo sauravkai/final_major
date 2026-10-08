@@ -15,6 +15,19 @@ const generateToken = (user) => {
   );
 };
 
+const serializeUserForClient = (user, statsOverride = null) => {
+  if (!user) return user;
+
+  const source = typeof user.toObject === 'function' ? user.toObject() : { ...user };
+
+  return {
+    ...source,
+    id: source._id || source.id,
+    createdAt: source.createdAt || source.created_at || null,
+    stats: statsOverride ?? source.stats ?? {},
+  };
+};
+
 export const demoLogin = async (req, res, next) => {
   try {
     const { role = 'candidate' } = req.body || {};
@@ -41,15 +54,7 @@ export const demoLogin = async (req, res, next) => {
     return res.json({
       success: true,
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        avatar: user.avatar,
-        title: user.title,
-        stats: liveStats,
-      },
+      user: serializeUserForClient(user, liveStats),
     });
   } catch (error) {
     next(error);
@@ -84,29 +89,13 @@ export const register = async (req, res, next) => {
       res.status(201).json({
         success: true,
         token,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          avatar: user.avatar,
-          title: user.title,
-          stats: liveStats,
-        },
+        user: serializeUserForClient(user, liveStats),
       });
     } catch (statErr) {
       res.status(201).json({
         success: true,
         token,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          avatar: user.avatar,
-          title: user.title,
-          stats: user.stats,
-        },
+        user: serializeUserForClient(user, user.stats),
       });
     }
   } catch (error) {
@@ -156,29 +145,13 @@ export const login = async (req, res, next) => {
       res.json({
         success: true,
         token,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          avatar: user.avatar,
-          title: user.title,
-          stats: liveStats,
-        },
+        user: serializeUserForClient(user, liveStats),
       });
     } catch (statErr) {
       res.json({
         success: true,
         token,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          avatar: user.avatar,
-          title: user.title,
-          stats: user.stats,
-        },
+        user: serializeUserForClient(user, user.stats),
       });
     }
   } catch (error) {
@@ -306,10 +279,10 @@ export const getMe = async (req, res, next) => {
     try {
       const liveStats = await computeLiveUserStats(user._id, user.role);
       User.findByIdAndUpdate(user._id, { stats: liveStats }).catch(() => {});
-      const payloadUser = { ...user.toObject(), stats: liveStats };
+      const payloadUser = serializeUserForClient(user, liveStats);
       res.json({ success: true, user: payloadUser });
     } catch (statErr) {
-      res.json({ success: true, user });
+      res.json({ success: true, user: serializeUserForClient(user, user.stats) });
     }
   } catch (error) {
     res.json({ success: true, user: req.user });
@@ -403,29 +376,13 @@ export const googleAuth = async (req, res, next) => {
         return res.json({
           success: true,
           token,
-          user: {
-            id: user._id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            avatar: user.avatar,
-            title: user.title,
-            stats: liveStats,
-          },
+          user: serializeUserForClient(user, liveStats),
         });
       } catch (statErr) {
         return res.json({
           success: true,
           token,
-          user: {
-            id: user._id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            avatar: user.avatar,
-            title: user.title,
-            stats: user.stats,
-          },
+          user: serializeUserForClient(user, user.stats),
         });
       }
     }
@@ -445,29 +402,13 @@ export const googleAuth = async (req, res, next) => {
       res.status(201).json({
         success: true,
         token,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          avatar: user.avatar,
-          title: user.title,
-          stats: liveStats,
-        },
+        user: serializeUserForClient(user, liveStats),
       });
     } catch (statErr) {
       res.status(201).json({
         success: true,
         token,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          avatar: user.avatar,
-          title: user.title,
-          stats: user.stats,
-        },
+        user: serializeUserForClient(user, user.stats),
       });
     }
   } catch (error) {
@@ -477,9 +418,27 @@ export const googleAuth = async (req, res, next) => {
 
 // Helper: compute live aggregated stats for a user
 async function computeLiveUserStats(userId, role = 'candidate') {
-  const uid = mongoose.Types.ObjectId(userId);
+  if (!userId) {
+    return {
+      interviewsCompleted: 0,
+      problemsSolved: 0,
+      averageScore: 0,
+      totalHours: 0,
+    };
+  }
 
-  // problemsSolved: distinct accepted problemIds from submissions
+  let uid;
+  try {
+    uid = new mongoose.Types.ObjectId(userId);
+  } catch (error) {
+    return {
+      interviewsCompleted: 0,
+      problemsSolved: 0,
+      averageScore: 0,
+      totalHours: 0,
+    };
+  }
+
   const problemsAgg = await Submission.aggregate([
     { $match: { userId: uid, status: 'Accepted' } },
     { $group: { _id: '$problemId' } },
@@ -487,28 +446,33 @@ async function computeLiveUserStats(userId, role = 'candidate') {
   ]).exec();
   const problemsSolved = (problemsAgg[0] && problemsAgg[0].count) || 0;
 
-  // interviewsCompleted and averageScore from InterviewResult
-  const matchField = role === 'interviewer' ? { interviewerId: uid } : { candidateId: uid };
-  const interviewsAgg = await InterviewResult.aggregate([
-    { $match: matchField },
+  const interviewMatches = [
+    { $match: { status: 'completed', $or: [{ candidateId: uid }, { interviewerId: uid }] } },
     {
       $group: {
         _id: null,
         count: { $sum: 1 },
-        avgScore: { $avg: '$overallScore' },
+        avgScore: { $avg: '$durationMinutes' },
       },
     },
-  ]).exec();
-  const interviewsCompleted = (interviewsAgg[0] && interviewsAgg[0].count) || 0;
-  const averageScore = Math.round((interviewsAgg[0] && interviewsAgg[0].avgScore) || 0);
+  ];
 
-  // totalHours: sum of durationMinutes for completed interviews (candidate or interviewer)
+  const interviewsAgg = await Interview.aggregate(interviewMatches).exec();
+  const interviewCount = (interviewsAgg[0] && interviewsAgg[0].count) || 0;
+  const resultAgg = await InterviewResult.aggregate([
+    { $match: { $or: [{ candidateId: uid }, { interviewerId: uid }] } },
+    { $group: { _id: null, count: { $sum: 1 }, avgScore: { $avg: '$overallScore' } } },
+  ]).exec();
+
+  const interviewsCompleted = Math.max(interviewCount, (resultAgg[0] && resultAgg[0].count) || 0);
+  const averageScore = Math.round((resultAgg[0] && resultAgg[0].avgScore) || 0);
+
   const interviewsHoursAgg = await Interview.aggregate([
     { $match: { status: 'completed', $or: [{ candidateId: uid }, { interviewerId: uid }] } },
     { $group: { _id: null, totalMinutes: { $sum: '$durationMinutes' } } },
   ]).exec();
   const totalMinutes = (interviewsHoursAgg[0] && interviewsHoursAgg[0].totalMinutes) || 0;
-  const totalHours = Math.round((totalMinutes / 60) * 10) / 10; // one decimal
+  const totalHours = Math.round((totalMinutes / 60) * 10) / 10;
 
   return {
     interviewsCompleted,

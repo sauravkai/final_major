@@ -12,6 +12,7 @@ const connectionOptions = {
 // Event listeners for database connection health
 mongoose.connection.on('connected', () => {
   console.log('[Database] MongoDB connection established successfully.');
+  console.log(`[Database] Active database: ${mongoose.connection.name}`);
 });
 
 mongoose.connection.on('error', (err) => {

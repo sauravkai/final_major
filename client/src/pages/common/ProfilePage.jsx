@@ -43,6 +43,18 @@ import {
 export const ProfilePage = () => {
   const { user, logout, setUser } = useAuth();
   const navigate = useNavigate();
+  const memberSince = (() => {
+    const value = user?.createdAt || user?.created_at;
+    if (!value) return '—';
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+
+    return new Intl.DateTimeFormat('en-US', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(date);
+  })();
   const [isEditing, setIsEditing] = useState(false);
   const [isChangingPassword, setIsChangingPassword] = useState(false);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
@@ -412,7 +424,7 @@ export const ProfilePage = () => {
                     )}
                     <div className="flex items-center gap-3">
                       <Calendar className="h-4 w-4 text-slate-400" />
-                      <span>Member since 2024</span>
+                      <span>{memberSince === '—' ? 'Member since unavailable' : `Member since ${memberSince}`}</span>
                     </div>
                   </div>
                 </div>

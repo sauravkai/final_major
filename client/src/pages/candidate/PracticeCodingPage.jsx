@@ -6,7 +6,7 @@ import { TestRunnerUI } from '../../components/editor/TestRunnerUI';
 import { InterviewTimer } from '../../components/interview/InterviewTimer';
 import { Code2, BookOpen, Layers, CheckCircle2, ChevronRight, Sun, Moon, Lightbulb, BarChart3, Clock, Cpu, MemoryStick, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
 import API from '../../services/api';
-import { EMPTY_STREAK, resolveLearningStreak } from '../../utils/dashboardStats';
+import { EMPTY_STREAK, replaceSolvedHistory, resolveLearningStreak } from '../../utils/dashboardStats';
 
 const getDefaultTemplate = (selectedLanguage = 'javascript') => {
   const templates = {
@@ -297,6 +297,7 @@ export const PracticeCodingPage = () => {
 
   const recordSolvedProblem = (problemData) => {
     const problemTitle = problemData?.title || problemData?.name || 'Solved Question';
+    const problemId = problemData?._id || problemData?.id || null;
     const now = new Date();
     const solvedDate = [
       now.getFullYear(),
@@ -307,12 +308,22 @@ export const PracticeCodingPage = () => {
     try {
       const existingHistory = JSON.parse(localStorage.getItem('solvedQuestionHistory') || '[]');
       const nextHistory = Array.isArray(existingHistory) ? existingHistory : [];
-      nextHistory.push({
-        date: solvedDate,
-        problemTitle,
-        solvedAt: now.toISOString(),
+      const mergedEntries = [...nextHistory];
+      const matchesExisting = mergedEntries.some((entry) => {
+        if (problemId && entry?.problemId) return String(entry.problemId) === String(problemId);
+        return (entry?.problemTitle || '').toLowerCase() === problemTitle.toLowerCase();
       });
-      localStorage.setItem('solvedQuestionHistory', JSON.stringify(nextHistory));
+
+      if (!matchesExisting) {
+        mergedEntries.push({
+          date: solvedDate,
+          problemId,
+          problemTitle,
+          solvedAt: now.toISOString(),
+        });
+      }
+
+      replaceSolvedHistory(mergedEntries, 'live');
     } catch (error) {
       console.warn('Failed to save solved question history:', error);
     }
@@ -360,7 +371,11 @@ export const PracticeCodingPage = () => {
             localStorage.setItem('solvedProgress', String(serverSolvedCount));
           } catch (err) {
             console.warn('Could not refresh user after accepted submission:', err);
-            const fallbackSolvedCount = Number(user?.stats?.problemsSolved ?? localStorage.getItem('solvedProgress') ?? 0) + 1;
+            const fallbackSolvedCount = Math.max(
+              Number(user?.stats?.problemsSolved ?? 0),
+              Number(localStorage.getItem('solvedProgress') || 0),
+              JSON.parse(localStorage.getItem('solvedQuestionHistory') || '[]').filter(Boolean).length || 0,
+            );
             recordSolvedProblem(problem);
             updateUserStats({ problemsSolved: fallbackSolvedCount });
             localStorage.setItem('solvedProgress', String(fallbackSolvedCount));

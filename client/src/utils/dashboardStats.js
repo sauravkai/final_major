@@ -91,18 +91,73 @@ export function resolveLearningStreak(rawStreak = null, now = new Date()) {
   };
 }
 
-export function getCanonicalSolvedCount({ user, solvedHistory = [], localSolvedProgress = 0 }) {
-  const statCount = Number(user?.stats?.problemsSolved ?? 0);
-  const historyCount = Array.isArray(solvedHistory)
-    ? solvedHistory.filter((entry) => entry?.problemTitle).length
-    : 0;
-  const localCount = Number(localSolvedProgress || 0);
-
-  if (Array.isArray(solvedHistory) && solvedHistory.length > 0) {
-    return Math.max(historyCount, localCount, statCount, 0);
+export function getSolvedHistoryKey(entry = {}) {
+  if (entry?.problemId) {
+    return `problem:${String(entry.problemId)}`;
   }
 
-  return Math.max(statCount, localCount, 0);
+  if (entry?.problemTitle) {
+    return `title:${String(entry.problemTitle).trim().toLowerCase()}`;
+  }
+
+  if (entry?.slug) {
+    return `slug:${String(entry.slug).trim().toLowerCase()}`;
+  }
+
+  return `fallback:${entry?.date || entry?.solvedAt || ''}`;
+}
+
+export function dedupeSolvedHistory(entries = []) {
+  const seen = new Set();
+
+  return (Array.isArray(entries) ? entries : []).filter((entry) => {
+    if (!entry || (!entry.problemId && !entry.problemTitle && !entry.slug)) {
+      return false;
+    }
+
+    const key = getSolvedHistoryKey(entry);
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+export function replaceSolvedHistory(entries = [], source = 'local') {
+  const nextHistory = dedupeSolvedHistory(Array.isArray(entries) ? entries : []);
+  const progressValue = Math.max(0, Number(nextHistory.length || 0));
+
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem('solvedQuestionHistory');
+    localStorage.removeItem('solvedProgress');
+    localStorage.removeItem('lastSolvedMonth');
+    localStorage.setItem('solvedQuestionHistory', JSON.stringify(nextHistory));
+    localStorage.setItem('solvedProgress', String(progressValue));
+    if (source === 'live' && nextHistory.length > 0) {
+      localStorage.setItem('lastSolvedMonth', new Date().toLocaleString('en-US', { month: 'short' }));
+    }
+  }
+
+  return nextHistory;
+}
+
+export function getCanonicalSolvedCount({ user, solvedHistory = [], localSolvedProgress = 0 }) {
+  const statCount = Number(user?.stats?.problemsSolved ?? 0);
+  const uniqueHistory = dedupeSolvedHistory(solvedHistory);
+  const historyCount = uniqueHistory.length;
+  const localCount = Number(localSolvedProgress || 0);
+
+  if (statCount > 0) {
+    return Math.max(statCount, historyCount);
+  }
+
+  if (historyCount > 0) {
+    return Math.max(historyCount, Math.min(localCount, historyCount));
+  }
+
+  return Math.max(0, localCount);
 }
 
 export function buildCategoryDistribution({ solvedCount = 0, solvedHistory = [], problems = [] }) {

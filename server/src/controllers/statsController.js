@@ -27,9 +27,9 @@ export const overview = async (req, res, next) => {
     ]).exec();
     const problemsSolved = (problemsAgg[0] && problemsAgg[0].count) || 0;
 
-    const interviewsAgg = await InterviewResult.aggregate([
-      { $match: { candidateId: uid } },
-      { $group: { _id: null, count: { $sum: 1 }, avgScore: { $avg: '$overallScore' } } },
+    const interviewsAgg = await Interview.aggregate([
+      { $match: { status: 'completed', $or: [{ candidateId: uid }, { interviewerId: uid }] } },
+      { $group: { _id: null, count: { $sum: 1 }, avgScore: { $avg: '$durationMinutes' } } },
     ]).exec();
     const interviewsCompleted = (interviewsAgg[0] && interviewsAgg[0].count) || 0;
     const averageScore = Math.round((interviewsAgg[0] && interviewsAgg[0].avgScore) || 0);
@@ -109,7 +109,7 @@ export const interviewsActivity = async (req, res, next) => {
     start.setDate(1);
 
     const agg = await Interview.aggregate([
-      { $match: { $or: [{ candidateId: uid }, { interviewerId: uid }], createdAt: { $gte: start } } },
+      { $match: { status: 'completed', $or: [{ candidateId: uid }, { interviewerId: uid }], createdAt: { $gte: start } } },
       { $group: { _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } }, count: { $sum: 1 } } },
       { $sort: { '_id.year': 1, '_id.month': 1 } },
     ]).exec();

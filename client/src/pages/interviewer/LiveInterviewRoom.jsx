@@ -10,6 +10,7 @@ import { useSocket } from '../../context/SocketContext';
 import { useAuth } from '../../context/AuthContext';
 import { Video, Code2, MessageSquare, NotebookPen, PhoneOff, CheckCircle2, AlertCircle } from 'lucide-react';
 import API from '../../services/api';
+import { isSessionJoinAllowed } from '../../utils/sessionAccess';
 
 // Question data - expanded to match problem bank
 const commentCodeBlock = (source = '') => {
@@ -1511,6 +1512,20 @@ export const LiveInterviewRoom = () => {
           const interview = res.data.data;
           const candidateInfo = interview.candidateId || {};
           const interviewerInfo = interview.interviewerId || {};
+
+          if (!isSessionJoinAllowed(interview)) {
+            const startTime = interview?.scheduledAt ? new Date(interview.scheduledAt) : null;
+            const hasNotStarted = startTime && startTime.getTime() > Date.now();
+
+            setConnectionError(
+              hasNotStarted
+                ? `This interview has not started yet. It is scheduled for ${startTime.toLocaleString()}.`
+                : 'This session has already ended and cannot be rejoined.'
+            );
+            setIsLoading(false);
+            navigate('/dashboard', { replace: true });
+            return;
+          }
 
           setCandidateName(interview.candidateName || candidateInfo.name || 'Candidate');
           setCandidateTitle(candidateInfo.title || interview.role || 'Candidate');

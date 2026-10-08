@@ -14,6 +14,7 @@ import mongoose from 'mongoose';
 import { config } from './config/env.js';
 import { connectDB } from './config/db.js';
 import { seedProblems } from './seeders/problemSeeder.js';
+import { seedDefaultUsers } from './seeders/userSeeder.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { setupInterviewSocket } from './sockets/interviewSocket.js';
 
@@ -98,7 +99,7 @@ app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 // General API Limiter (150 requests per 15 minutes per IP)
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 150,
+  max: config.isProduction ? 150 : 2000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many requests from this IP. Please try again later.' },
@@ -166,12 +167,7 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
-app.get('/', (req, res) => {
-  res.status(200).json({
-    status: 'success',
-    message: 'AI Interview Platform API is running successfully.'
-  });
-});
+
 
 // 9. API Routes
 app.use('/api/auth', authRoutes);
@@ -214,8 +210,9 @@ if (config.serveStatic && fs.existsSync(clientDistPath)) {
 app.use(errorHandler);
 
 // 12. Connect DB & Setup Real-time WebSockets
-connectDB().then(() => {
-  seedProblems();
+connectDB().then(async () => {
+  await seedProblems();
+  await seedDefaultUsers();
 });
 setupInterviewSocket(io);
 

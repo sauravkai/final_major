@@ -216,6 +216,11 @@ export const getUserInterviewReports = async (req, res, next) => {
   }
 };
 
+const canRejoinInterview = (status) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  return !['completed', 'finished', 'cancelled', 'ended', 'closed'].includes(normalized);
+};
+
 export const getInterviewByRoomId = async (req, res, next) => {
   try {
     const { roomId } = req.params;
@@ -238,6 +243,15 @@ export const getInterviewByRoomId = async (req, res, next) => {
       return res.status(404).json({
         success: false,
         message: 'Interview not found.',
+      });
+    }
+
+    if (!canRejoinInterview(interview.status)) {
+      return res.status(409).json({
+        success: false,
+        ended: true,
+        message: 'This interview session has already ended and cannot be rejoined.',
+        data: interview,
       });
     }
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import {
   Trophy,
@@ -24,12 +24,15 @@ import {
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend, BarChart, Bar, PieChart as RechartsPieChart, Pie, Cell } from 'recharts';
 import API from '../../services/api';
-import { buildCategoryDistribution, getCanonicalSolvedCount, normalizeLearningStreak } from '../../utils/dashboardStats';
+import { buildCategoryDistribution, dedupeSolvedHistory, getCanonicalSolvedCount, normalizeLearningStreak, replaceSolvedHistory } from '../../utils/dashboardStats';
+import { isSessionVisibleInUpcomingList } from '../../utils/sessionAccess';
 
 export const CandidateDashboard = () => {
   const { user, setUser } = useAuth();
+  const navigate = useNavigate();
   const [problems, setProblems] = useState([]);
   const [interviews, setInterviews] = useState([]);
+  const [previousInterviews, setPreviousInterviews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isDark, setIsDark] = useState(false);
   const [showHints, setShowHints] = useState(false);
@@ -43,6 +46,8 @@ export const CandidateDashboard = () => {
   const [streakData, setStreakData] = useState({ currentStreak: 0, weeklyProgress: [false, false, false, false, false, false, false] });
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [solvedHistory, setSolvedHistory] = useState([]);
+  const [selectedPreviousInterview, setSelectedPreviousInterview] = useState(null);
+  const [showReportModal, setShowReportModal] = useState(false);
 
   // Calculate learning streak from localStorage
   const calculateStreak = () => {
@@ -117,6 +122,41 @@ export const CandidateDashboard = () => {
     setStreakData(freshStreak);
   };
 
+  const fetchPreviousInterviews = async () => {
+    try {
+      const res = await API.get('/interviews/reports');
+      const serverReports = res.data?.success && Array.isArray(res.data.data) ? res.data.data : [];
+      const localSavedReports = (() => {
+        try {
+          const raw = JSON.parse(localStorage.getItem('previousInterviewReports') || '[]');
+          return Array.isArray(raw) ? raw : [];
+        } catch {
+          return [];
+        }
+      })();
+
+      const mergedReports = [...localSavedReports, ...serverReports].reduce((acc, report) => {
+        if (!report || !report._id && !report.reportId) return acc;
+        const key = String(report._id || report.reportId || '');
+        const normalizedReport = {
+          ...report,
+          _id: report._id || report.reportId || key,
+          title: report.title || report.interviewTitle || report.topic || report.problemTitle || 'Interview Report',
+        };
+
+        if (key && !acc.some((item) => String(item._id || item.reportId || '') === key)) {
+          acc.push(normalizedReport);
+        }
+
+        return acc;
+      }, []);
+
+      setPreviousInterviews(mergedReports);
+    } catch (e) {
+      console.warn('Unable to load saved interview reports.', e);
+    }
+  };
+
   useEffect(() => {
     // Load streak data on mount
     setStreakData(calculateStreak());
@@ -131,8 +171,14 @@ export const CandidateDashboard = () => {
         if (probRes.status === 'fulfilled' && probRes.value.data.success) {
           setProblems(probRes.value.data.data);
         }
-        if (intRes.status === 'fulfilled' && intRes.value.data.success && intRes.value.data.data.length > 0) {
-          setInterviews(intRes.value.data.data);
+        if (intRes.status === 'fulfilled' && intRes.value.data.success) {
+          const activeInterviews = Array.isArray(intRes.value.data.data)
+            ? intRes.value.data.data.filter((interview) => {
+                const status = String(interview?.status ?? '').trim().toLowerCase();
+                return !['completed', 'finished', 'cancelled', 'ended', 'closed'].includes(status);
+              })
+            : [];
+          setInterviews(activeInterviews);
         }
       } catch (e) {
         console.warn('API connection offline, utilizing initial seed problem set.');
@@ -141,6 +187,7 @@ export const CandidateDashboard = () => {
       }
     }
     loadDashboardData();
+    fetchPreviousInterviews();
   }, []);
 
   const performanceMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -161,7 +208,14 @@ export const CandidateDashboard = () => {
     solvedHistory: canonicalSolvedEntries,
     localSolvedProgress: Number(localStorage.getItem('solvedProgress') || 0),
   });
-  const interviewCount = user?.stats?.interviewsCompleted ?? 0;
+  const completedInterviewRecords = [...(Array.isArray(interviews) ? interviews : []), ...(Array.isArray(previousInterviews) ? previousInterviews : [])].filter((entry) => {
+    if (!entry) return false;
+    const status = String(entry?.status || entry?.state || '').trim().toLowerCase();
+    const hasCompletedMarker = ['completed', 'finished'].includes(status);
+    const hasHistoricDate = !!(entry?.completedDate || entry?.interviewDate || entry?.endedAt || entry?.scheduledAt || entry?.completedAt || entry?.createdAt || entry?.startedAt || entry?.time);
+    return hasCompletedMarker || (hasHistoricDate && (status === '' || status === 'scheduled'));
+  });
+  const interviewCount = completedInterviewRecords.length || Number(user?.stats?.interviewsCompleted || 0);
   const completionPercent = Math.min(100, Math.max(0, readinessScore));
   const categoryDistribution = buildCategoryDistribution({ solvedCount: canonicalSolvedEntries.length || solvedCount, solvedHistory: canonicalSolvedEntries, problems });
 
@@ -202,24 +256,31 @@ export const CandidateDashboard = () => {
           })
           .filter(Boolean);
 
-        const mergedHistory = [...localHistory, ...history].filter((entry) => entry?.date && entry?.problemTitle);
-        const canonicalTotal = Math.max(mergedHistory.length, Number(user?.stats?.problemsSolved ?? 0), Number(localStorage.getItem('solvedProgress') || 0));
+        const mergedHistory = dedupeSolvedHistory([...localHistory, ...history].filter((entry) => entry?.date && entry?.problemTitle));
+        const uniqueHistoryCount = mergedHistory.length;
+        const canonicalTotal = Math.max(Number(user?.stats?.problemsSolved ?? 0), uniqueHistoryCount);
 
         if (canonicalTotal > 0) {
-          localStorage.setItem('solvedProgress', String(canonicalTotal));
+          replaceSolvedHistory(mergedHistory, 'live');
+        } else {
+          replaceSolvedHistory([], 'local');
         }
 
         if (isMounted) { setSolvedHistory(mergedHistory); }
       } catch (error) {
         try {
           const storedHistory = JSON.parse(localStorage.getItem('solvedQuestionHistory') || '[]');
-          const canonicalTotal = Math.max(Array.isArray(storedHistory) ? storedHistory.length : 0, Number(user?.stats?.problemsSolved ?? 0), Number(localStorage.getItem('solvedProgress') || 0));
+          const dedupedStoredHistory = dedupeSolvedHistory(Array.isArray(storedHistory) ? storedHistory : []);
+          const uniqueHistoryCount = dedupedStoredHistory.length;
+          const canonicalTotal = Math.max(Number(user?.stats?.problemsSolved ?? 0), uniqueHistoryCount);
 
           if (canonicalTotal > 0) {
-            localStorage.setItem('solvedProgress', String(canonicalTotal));
+            replaceSolvedHistory(dedupedStoredHistory, 'local');
+          } else {
+            replaceSolvedHistory([], 'local');
           }
 
-          if (isMounted) setSolvedHistory(Array.isArray(storedHistory) ? storedHistory : []);
+          if (isMounted) setSolvedHistory(dedupedStoredHistory);
         } catch {
           if (isMounted) setSolvedHistory([]);
         }
@@ -310,6 +371,19 @@ export const CandidateDashboard = () => {
   const filteredProblems = selectedCategory === 'All'
     ? problems
     : problems.filter((problem) => problem.category === selectedCategory);
+
+  const getScoreColor = (score = 0) => {
+    if (score >= 80) return 'bg-emerald-100 text-emerald-700';
+    if (score >= 60) return 'bg-amber-100 text-amber-700';
+    return 'bg-rose-100 text-rose-700';
+  };
+
+  const openReport = (report) => {
+    setSelectedPreviousInterview(report);
+    setShowReportModal(true);
+  };
+
+  const selectedReportDetails = selectedPreviousInterview || {};
 
   return (
     <div className={`space-y-8 w-full px-0 py-8 min-h-screen ${isDark ? 'bg-slate-950' : 'bg-slate-50'}`}>
@@ -519,8 +593,8 @@ export const CandidateDashboard = () => {
         </div>
       </div>
 
-      {/* Main Grid: Scheduled Interviews & Recommended Practice Problems */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* Main Grid: Scheduled Interviews & Recommended Practice Problems */}
         {/* Left Column: Scheduled & Past Interviews */}
         <div className="lg:col-span-7 space-y-6">
           <div className={`p-6 rounded-2xl border space-y-4 ${isDark ? 'glass-panel bg-slate-900/50 border-slate-800' : 'bg-white border-slate-200 shadow-md'}`}>
@@ -531,12 +605,12 @@ export const CandidateDashboard = () => {
             </div>
 
             <div className="space-y-3">
-              {interviews.length === 0 ? (
+              {interviews.filter(isSessionVisibleInUpcomingList).length === 0 ? (
                 <div className={`p-4 rounded-xl border border-dashed ${isDark ? 'border-slate-700 bg-slate-900/60 text-slate-400' : 'border-slate-300 bg-slate-50 text-slate-600'}`}>
                   No interviews are scheduled yet. Your upcoming sessions will appear here.
                 </div>
               ) : (
-                interviews.map((item, idx) => {
+                interviews.filter(isSessionVisibleInUpcomingList).map((item, idx) => {
                   const roomId = item.roomId || item.room || `room-${idx + 1}`;
                   const titleStr = item.title || 'Interview Session';
                   const interviewerStr = item.interviewer || item.candidateName || 'Interview Team';
@@ -610,6 +684,64 @@ export const CandidateDashboard = () => {
               </div>
             </div>
           </div>
+
+          <div className={`p-6 rounded-2xl border ${isDark ? 'glass-panel bg-slate-900/50 border-slate-800' : 'bg-white border-slate-200 shadow-md'}`}>
+            <div className={`flex items-center justify-between pb-3 ${isDark ? 'border-b border-slate-800' : 'border-b border-slate-200'}`}>
+              <h3 className={`text-base font-heading font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                <Award className={`w-4 h-4 ${isDark ? 'text-amber-400' : 'text-amber-600'}`} /> Previous Interview Reports
+              </h3>
+              <span className={`px-2.5 py-1 rounded-full text-[10px] font-mono font-bold ${isDark ? 'bg-amber-500/10 text-amber-300' : 'bg-amber-100 text-amber-700'}`}>
+                {previousInterviews.length} Completed
+              </span>
+            </div>
+
+            <div className="space-y-3 pt-4">
+              {previousInterviews.length === 0 ? (
+                <div className={`p-4 rounded-xl border border-dashed ${isDark ? 'border-slate-700 bg-slate-900/60 text-slate-400' : 'border-slate-300 bg-slate-50 text-slate-600'}`}>
+                  No completed interviews have been saved yet. Your scorecards will appear here once a session is finished.
+                </div>
+              ) : (
+                previousInterviews.map((report, index) => (
+                  <button
+                    key={report._id || report.reportId || index}
+                    type="button"
+                    onClick={() => openReport(report)}
+                    className={`w-full text-left p-4 rounded-xl border transition-all ${isDark ? 'bg-slate-900/80 border-slate-800 hover:border-purple-500/40' : 'bg-slate-50 border-slate-200 hover:border-purple-300'}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 flex-wrap mb-2">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${isDark ? 'bg-emerald-500/20 text-emerald-400' : 'bg-emerald-100 text-emerald-700'}`}>
+                            Completed
+                          </span>
+                          <span className={`text-[10px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                            {report.completedDate || report.interviewDate || 'Recently'}
+                          </span>
+                        </div>
+                        <h4 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                          {report.title || report.interviewTitle || report.topic || report.problemTitle || 'Interview Report'}
+                        </h4>
+                        <div className={`mt-2 flex items-center gap-3 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                          <span>{report.duration || 'N/A'}</span>
+                          <span>•</span>
+                          <span>{report.questionsAsked || report.totalQuestions || 0} questions</span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col items-end gap-2">
+                        <div className={`px-3 py-1 rounded-lg text-sm font-bold ${Number(report.overallScore || 0) >= 80 ? 'bg-emerald-500 text-white' : Number(report.overallScore || 0) >= 60 ? 'bg-amber-500 text-white' : 'bg-slate-500 text-white'}`}>
+                          {report.overallScore || 0}%
+                        </div>
+                        <div className={`inline-flex items-center gap-1 text-[10px] font-medium ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                          <CheckCircle2 className="w-3 h-3 text-emerald-500" /> View Report
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Right Column: Problem Bank List */}
@@ -678,6 +810,182 @@ export const CandidateDashboard = () => {
           </div>
         </div>
       </div>
+
+      {showReportModal && selectedPreviousInterview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-5xl bg-white rounded-3xl border border-slate-200 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-200 p-5">
+              <div>
+                <h3 className="text-lg font-heading font-bold text-slate-900 flex items-center gap-2">
+                  <Award className="w-5 h-5 text-purple-600" /> Interview Report
+                </h3>
+                <p className="text-xs text-slate-600">Detailed evaluation and feedback</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowReportModal(false)}
+                className="text-slate-400 hover:text-slate-900 text-base font-bold px-2 py-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-5 space-y-6">
+              <div className="bg-gradient-to-r from-purple-50 to-indigo-50 p-4 rounded-xl border border-purple-100">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1">
+                    <h4 className="text-base font-bold text-slate-900 mb-1">
+                      {selectedPreviousInterview.title || selectedPreviousInterview.topic || 'Interview Report'}
+                    </h4>
+                    <p className="text-xs text-slate-600 mb-2">
+                      Candidate: <strong className="text-slate-800">{selectedPreviousInterview.candidateName || user?.name || 'Candidate'}</strong> ({selectedPreviousInterview.role || 'Software Engineer'})
+                    </p>
+                    <div className="flex items-center gap-3 text-xs text-slate-500 flex-wrap">
+                      <span className="font-mono">{selectedPreviousInterview.completedDate || selectedPreviousInterview.interviewDate || 'Recently'}</span>
+                      <span>•</span>
+                      <span>{selectedPreviousInterview.duration || 'N/A'}</span>
+                      <span>•</span>
+                      <span className="font-mono">{selectedPreviousInterview.sessionId || selectedPreviousInterview.roomId || 'session'}</span>
+                    </div>
+                  </div>
+                  <div className={`px-4 py-2 rounded-xl text-2xl font-bold ${getScoreColor(Number(selectedPreviousInterview.overallScore || 0))}`}>
+                    {selectedPreviousInterview.overallScore || 0}%
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h5 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-indigo-600" /> Technical Skills Assessment
+                </h5>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {Object.entries(selectedReportDetails.technicalSkills || {}).map(([skill, score]) => (
+                    <div key={skill} className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                      <div className="text-[10px] text-slate-500 font-medium capitalize mb-1">{skill}</div>
+                      <div className="text-xl font-bold text-slate-900">{Number(score || 0)}%</div>
+                      <div className="w-full bg-slate-200 rounded-full h-1.5 mt-2">
+                        <div
+                          className={`h-1.5 rounded-full ${Number(score || 0) >= 90 ? 'bg-emerald-500' : Number(score || 0) >= 80 ? 'bg-blue-500' : Number(score || 0) >= 70 ? 'bg-amber-500' : 'bg-rose-500'}`}
+                          style={{ width: `${Math.min(100, Number(score || 0))}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <h5 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
+                  <Code2 className="w-4 h-4 text-purple-600" /> Question Details
+                </h5>
+                <div className="space-y-3">
+                  {(selectedReportDetails.questionMetrics || []).length === 0 ? (
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs text-slate-600">No question data was captured for this interview.</div>
+                  ) : (
+                    (selectedReportDetails.questionMetrics || []).map((metric, idx) => (
+                      <div key={`${metric.question || idx}-${idx}`} className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-xs font-bold text-slate-900">Q{idx + 1}: {metric.question || metric.title || 'Question'}</span>
+                          <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-semibold">{metric.score ?? 0}%</span>
+                        </div>
+                        <div className="text-[11px] text-slate-600 whitespace-pre-wrap">
+                          <span className="font-semibold text-slate-800">Candidate Answer:</span> {metric.answer || metric.candidateAnswer || metric.response || 'No answer captured'}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <h5 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-600" /> Feedback Summary
+                </h5>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100">
+                    <h6 className="text-xs font-bold text-emerald-700 mb-2 flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" /> Strengths
+                    </h6>
+                    <ul className="space-y-1">
+                      {((selectedReportDetails.feedback?.strengths || []) || []).length === 0 ? (
+                        <li className="text-xs text-emerald-800">No strengths captured.</li>
+                      ) : (
+                        (selectedReportDetails.feedback?.strengths || []).map((strength, idx) => (
+                          <li key={idx} className="text-xs text-emerald-800 flex items-start gap-1">
+                            <span className="text-emerald-500 mt-0.5">•</span>
+                            {strength}
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </div>
+                  <div className="bg-amber-50 p-4 rounded-xl border border-amber-100">
+                    <h6 className="text-xs font-bold text-amber-700 mb-2 flex items-center gap-1">
+                      <Target className="w-3 h-3" /> Areas for Improvement
+                    </h6>
+                    <ul className="space-y-1">
+                      {((selectedReportDetails.feedback?.improvements || []) || []).length === 0 ? (
+                        <li className="text-xs text-amber-800">No improvement notes captured.</li>
+                      ) : (
+                        (selectedReportDetails.feedback?.improvements || []).map((improvement, idx) => (
+                          <li key={idx} className="text-xs text-amber-800 flex items-start gap-1">
+                            <span className="text-amber-500 mt-0.5">•</span>
+                            {improvement}
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h5 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-indigo-600" /> Interview Notes & Chat
+                </h5>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                    <h6 className="text-xs font-bold text-slate-900 mb-2">Interviewer Notes</h6>
+                    <p className="text-xs text-slate-700 whitespace-pre-wrap">{selectedReportDetails.interviewerNotes || 'No notes were saved for this interview.'}</p>
+                  </div>
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                    <h6 className="text-xs font-bold text-slate-900 mb-2">Chat Transcript</h6>
+                    <div className="space-y-2 max-h-56 overflow-y-auto">
+                      {(selectedReportDetails.chatMessages || []).length === 0 ? (
+                        <p className="text-xs text-slate-600">No chat transcript captured.</p>
+                      ) : (
+                        (selectedReportDetails.chatMessages || []).map((msg, idx) => (
+                          <div key={`${msg.sender || 'message'}-${idx}`} className="rounded-lg bg-white border border-slate-200 p-2">
+                            <div className="text-[10px] font-bold uppercase text-indigo-600 mb-1">{msg.sender || msg.role || 'Participant'}</div>
+                            <div className="text-xs text-slate-700 whitespace-pre-wrap">{msg.text || msg.message || msg.content || 'No content'}</div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setShowReportModal(false)}
+                  className="px-5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-xs font-semibold text-slate-700 transition-all"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/results/${selectedPreviousInterview.reportId || selectedPreviousInterview._id || 'report'}`, { state: { reportData: selectedPreviousInterview } })}
+                  className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-xs font-extrabold text-white shadow-md transition-all flex items-center gap-2"
+                >
+                  <Award className="w-4 h-4" /> Open Full Scorecard
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

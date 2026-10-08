@@ -106,8 +106,9 @@ export const InterviewerWelcomePage = () => {
   ];
 
   const interviewerStats = user?.stats || {};
-  const interviewsConducted = Number(interviewerStats.interviewsCompleted ?? interviews.filter((it) => String(it.status || '').toLowerCase() === 'completed').length ?? 0);
-  const interviewHours = Number(interviewerStats.totalHours ?? interviews.reduce((sum, it) => sum + (Number(it.durationMinutes || 0) || 0), 0) / 60);
+  const completedInterviews = interviews.filter((it) => ['completed', 'finished'].includes(String(it.status || '').toLowerCase()));
+  const interviewsConducted = Number(interviewerStats.interviewsCompleted || completedInterviews.length || 0);
+  const interviewHours = Number(interviewerStats.totalHours || (completedInterviews.reduce((sum, it) => sum + (Number(it.durationMinutes || 0) || 0), 0) / 60) || 0);
 
   const { isDark, toggleTheme } = useTheme();
 

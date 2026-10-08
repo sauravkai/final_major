@@ -19,6 +19,7 @@ import {
 import { motion } from 'framer-motion';
 import StatsCharts from '../../components/common/StatsCharts';
 import { getCanonicalSolvedCount } from '../../utils/dashboardStats';
+import { isSessionJoinAllowed, isSessionVisibleInUpcomingList } from '../../utils/sessionAccess';
 
 export const CandidateWelcomePage = () => {
   const { user, token } = useAuth();
@@ -39,11 +40,25 @@ export const CandidateWelcomePage = () => {
     const fetchData = async () => {
       try {
         const API = (await import('../../services/api')).default;
-        const [ivRes, sRes] = await Promise.all([
+        const [ivRes, sRes, reportsRes] = await Promise.all([
           API.get('/interviews/my').catch(() => ({ data: { success: true, data: [] } })),
           API.get('/sessions').catch(() => ({ data: { success: true, sessions: [] } })),
+          API.get('/interviews/reports').catch(() => ({ data: { success: true, data: [] } })),
         ]);
-        setInterviews(ivRes.data?.data || []);
+
+        const interviewList = Array.isArray(ivRes.data?.data) ? ivRes.data.data : [];
+        const reportList = Array.isArray(reportsRes.data?.data) ? reportsRes.data.data : [];
+        const allInterviews = [...interviewList, ...reportList].reduce((acc, item) => {
+          if (!item || (!item._id && !item.roomId && !item.sessionId && !item.id && !item.reportId)) return acc;
+          const key = String(item._id || item.roomId || item.sessionId || item.id || item.reportId || '');
+          if (key && acc.some((existing) => String(existing._id || existing.roomId || existing.sessionId || existing.id || existing.reportId || '') === key)) {
+            return acc;
+          }
+          acc.push(item);
+          return acc;
+        }, []);
+
+        setInterviews(allInterviews);
         setSessions(sRes.data?.sessions || []);
       } catch (e) {
         // ignore network errors in demo
@@ -84,6 +99,24 @@ export const CandidateWelcomePage = () => {
   ];
 
   const { isDark, toggleTheme } = useTheme();
+  const liveUpcomingInterviews = (() => {
+    const normalized = [...(Array.isArray(interviews) ? interviews : []), ...(Array.isArray(sessions) ? sessions : [])]
+      .filter((item) => item && (item.roomId || item._id || item.sessionId || item.type))
+      .filter((item) => isSessionVisibleInUpcomingList(item))
+      .map((item) => {
+        const status = item.status || item.state || (item.isActive ? 'Live' : 'Scheduled');
+        return {
+          id: item._id || item.roomId || item.sessionId || item.type || 'session',
+          title: item.title || item.problemTitle || item.type || 'Interview Session',
+          status,
+          roomId: item.roomId || item._id || item.sessionId || item.id,
+          scheduledAt: item.scheduledAt || item.createdAt || item.startedAt || new Date().toISOString(),
+          durationMinutes: item.durationMinutes || 45,
+        };
+      });
+
+    return normalized;
+  })();
   const solvedHistory = (() => {
     try {
       const raw = JSON.parse(localStorage.getItem('solvedQuestionHistory') || '[]');
@@ -170,27 +203,45 @@ export const CandidateWelcomePage = () => {
         {/* Live Sessions & Recent Interviews */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
           <div className="bg-white rounded-3xl border border-slate-200 shadow p-6">
-            <h3 className="text-lg font-semibold text-slate-900 mb-4">Live / Upcoming Interviews</h3>
-            {interviews.length === 0 ? (
-              <div className="text-sm text-slate-500">No upcoming interviews found.</div>
-            ) : (
-              <ul className="space-y-3">
-                {interviews.slice(0, 5).map((it) => (
-                  <li key={it.roomId || it._id} className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-slate-900">{it.title || it.problemTitle || it.problemTitle}</div>
-                      <div className="text-xs text-slate-500">{new Date(it.scheduledAt || it.scheduledAt || Date.now()).toLocaleString()} • {it.durationMinutes || 45} min</div>
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-900">Live / Upcoming Interviews</h3>
+            </div>
+
+            <div className="space-y-3 pt-4">
+              {liveUpcomingInterviews.length === 0 ? (
+                <div className="p-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 text-slate-600 text-sm">
+                  No upcoming interviews found.
+                </div>
+              ) : (
+                liveUpcomingInterviews.slice(0, 5).map((it) => (
+                  <div key={it.id} className="p-4 rounded-xl border border-slate-200 bg-slate-50 hover:border-indigo-300 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${String(it.status).toLowerCase().includes('in') || String(it.status).toLowerCase().includes('live') ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                          {it.status || 'Scheduled'}
+                        </span>
+                        <span className="text-xs font-mono text-slate-500">{it.durationMinutes} min</span>
+                      </div>
+                      <h4 className="text-sm font-bold text-slate-900">{it.title}</h4>
+                      <p className="text-xs text-slate-600">{new Date(it.scheduledAt).toLocaleString()}</p>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className={`text-xs px-3 py-1 rounded-full ${it.status && it.status.toLowerCase().includes('in') ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{it.status || 'scheduled'}</div>
-                      {it.status && it.status.toLowerCase().includes('in') && (
-                        <Link to={`/live-room/${it.roomId || it._id}`} className="text-indigo-600 text-sm font-medium">Join</Link>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
+
+                    {isSessionJoinAllowed({ status: it.status, scheduledAt: it.scheduledAt }) ? (
+                      <Link
+                        to={`/live-room/${it.roomId}`}
+                        className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-600/20 transition-all"
+                      >
+                        Join Live Room
+                      </Link>
+                    ) : (
+                      <span className="text-xs text-slate-400">
+                        {new Date(it.scheduledAt).getTime() > Date.now() ? 'Starts Soon' : 'Ended'}
+                      </span>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
 
           <div className="bg-white rounded-3xl border border-slate-200 shadow p-6">

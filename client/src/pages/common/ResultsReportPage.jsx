@@ -187,7 +187,52 @@ export const ResultsReportPage = () => {
   const [report, setReport] = useState(defaultReport);
 
   const handlePrintScorecard = () => {
-    window.print();
+    const payload = reportRootRef.current?.innerHTML || '';
+    const printableHtml = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <title>Candidate Evaluation Scorecard</title>
+          <style>
+            body {
+              margin: 0;
+              padding: 24px;
+              font-family: Inter, sans-serif;
+              background: #ffffff;
+              color: #0f172a;
+            }
+            * { box-sizing: border-box; }
+            .print-card { box-shadow: none !important; border: 1px solid #e2e8f0 !important; }
+            .no-print { display: none !important; }
+            table, th, td { border-collapse: collapse; }
+            img { max-width: 100%; }
+          </style>
+        </head>
+        <body>
+          <div>${payload}</div>
+        </body>
+      </html>
+    `;
+
+    const printWindow = window.open('', '_blank', 'width=1200,height=900');
+    if (!printWindow) {
+      window.print();
+      return;
+    }
+
+    printWindow.document.open();
+    printWindow.document.write(printableHtml);
+    printWindow.document.close();
+    printWindow.focus();
+
+    setTimeout(() => {
+      try {
+        printWindow.print();
+      } catch (error) {
+        console.warn('Print dialog could not be opened automatically:', error);
+      }
+    }, 300);
   };
 
   useEffect(() => {

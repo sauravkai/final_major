@@ -15,9 +15,27 @@ if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'ai_i
 const rawAllowedOrigins = process.env.ALLOWED_ORIGINS || process.env.CLIENT_URL || 'http://localhost:5173,http://localhost:3001';
 const allowedOrigins = rawAllowedOrigins.split(',').map((o) => o.trim()).filter(Boolean);
 
+const defaultMongoDatabase = 'ai-interview-platform';
+const rawMongoUri = process.env.MONGO_URI || `mongodb://localhost:27017/${defaultMongoDatabase}`;
+
+const normalizeMongoUri = (uri) => {
+  try {
+    const parsed = new URL(uri);
+    if (!parsed.pathname || parsed.pathname === '/' || parsed.pathname === '') {
+      parsed.pathname = `/${defaultMongoDatabase}`;
+    }
+    return parsed.toString();
+  } catch {
+    const trimmed = uri.replace(/\/+$/, '');
+    return trimmed.endsWith(`/${defaultMongoDatabase}`)
+      ? trimmed
+      : `${trimmed}/${defaultMongoDatabase}`;
+  }
+};
+
 export const config = {
   port: parseInt(process.env.PORT || '5000', 10),
-  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/ai-interview-platform',
+  mongoUri: normalizeMongoUri(rawMongoUri),
   jwtSecret: jwtSecret || 'fallback_secret_for_dev_mode_only',
   jwtExpire: process.env.JWT_EXPIRE || '7d',
   nodeEnv,

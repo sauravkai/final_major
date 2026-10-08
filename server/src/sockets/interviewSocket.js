@@ -1,7 +1,27 @@
+import { Interview } from '../models/Interview.js';
+
 /**
  * Socket.IO Handler for Real-Time Collaborative Coding, WebRTC Signaling, and Interview Room State
  */
 export const setupInterviewSocket = (io) => {
+  const canJoinInterviewRoom = async (roomId) => {
+    if (!roomId) return false;
+
+    const interview = await Interview.findOne({ roomId }).select('status scheduledAt').lean().catch(() => null);
+    if (!interview) return true;
+
+    const normalized = String(interview.status || '').trim().toLowerCase();
+    if (['completed', 'finished', 'cancelled', 'ended', 'closed'].includes(normalized)) {
+      return false;
+    }
+
+    const scheduledAt = interview.scheduledAt ? new Date(interview.scheduledAt).getTime() : null;
+    if (scheduledAt && !Number.isNaN(scheduledAt) && scheduledAt > Date.now()) {
+      return false;
+    }
+
+    return true;
+  };
   // Store room state in-memory
   const roomState = new Map();
 
@@ -9,7 +29,20 @@ export const setupInterviewSocket = (io) => {
     console.log(`[Socket.IO] Client connected: ${socket.id}`);
 
     // Join Interview Room
-    socket.on('join-room', ({ roomId, user }) => {
+    socket.on('join-room', async ({ roomId, user }) => {
+      if (!roomId) {
+        return;
+      }
+
+      const isAllowed = await canJoinInterviewRoom(roomId);
+      if (!isAllowed) {
+        socket.emit('session-ended', {
+          roomId,
+          message: 'This interview session has already ended and cannot be rejoined.',
+        });
+        return;
+      }
+
       socket.join(roomId);
 
       if (!roomState.has(roomId)) {

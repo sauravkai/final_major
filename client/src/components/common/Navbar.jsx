@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
@@ -30,11 +30,21 @@ export const Navbar = () => {
   const [notificationMenuOpen, setNotificationMenuOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [inviteToast, setInviteToast] = useState(null);
+  const inviteToastTimeoutRef = useRef(null);
+
+  const normalizeEmail = (email) => typeof email === 'string' ? email.trim().toLowerCase() : '';
 
   useEffect(() => {
     const syncNotifications = () => {
       const filtered = getNotificationsForUser(user?.email || '');
       setNotifications(filtered);
+    };
+
+    const clearInviteToastTimer = () => {
+      if (inviteToastTimeoutRef.current) {
+        window.clearTimeout(inviteToastTimeoutRef.current);
+        inviteToastTimeoutRef.current = null;
+      }
     };
 
     syncNotifications();
@@ -44,20 +54,25 @@ export const Navbar = () => {
       const notification = event.detail;
       if (!notification) return;
 
-      const shouldShowToast = !user?.email || !notification.recipientEmail || notification.recipientEmail === user.email.toLowerCase();
+      const currentUserEmail = normalizeEmail(user?.email);
+      const targetEmail = normalizeEmail(notification.recipientEmail || notification.candidateEmail || notification.email);
+      const shouldShowToast = !currentUserEmail || !targetEmail || targetEmail === currentUserEmail;
       if (!shouldShowToast) return;
 
+      clearInviteToastTimer();
       setInviteToast(notification);
       setNotificationMenuOpen(true);
 
-      const timeoutId = window.setTimeout(() => setInviteToast(null), 7000);
-      return () => window.clearTimeout(timeoutId);
+      inviteToastTimeoutRef.current = window.setTimeout(() => {
+        setInviteToast((current) => (current?.id === notification.id ? null : current));
+      }, 7000);
     };
 
     window.addEventListener('storage', handleStorageSync);
     window.addEventListener('live-room-notification', handleInviteToast);
 
     return () => {
+      clearInviteToastTimer();
       window.removeEventListener('storage', handleStorageSync);
       window.removeEventListener('live-room-notification', handleInviteToast);
     };
