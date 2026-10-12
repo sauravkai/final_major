@@ -2,10 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { NotebookPen, Save } from 'lucide-react';
 
 export const SharedNotes = ({ value = '', onChange = () => {}, onSave = () => {} }) => {
-  const [notes, setNotes] = useState(
-    value ||
-      "Interviewer Evaluation Scratchpad:\n- Candidate explained time complexity (O(N) time, O(N) space).\n- Handled null input edge cases cleanly.\n- Strong verbal reasoning."
-  );
+  const [notes, setNotes] = useState(value || '');
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -42,7 +39,7 @@ export const SharedNotes = ({ value = '', onChange = () => {}, onSave = () => {}
         value={notes}
         onChange={handleChange}
         className="w-full h-full min-h-[140px] bg-slate-950 p-3 text-xs text-slate-300 font-mono focus:outline-none resize-none"
-        placeholder="Type interviewer notes here..."
+        placeholder=""
       />
     </div>
   );

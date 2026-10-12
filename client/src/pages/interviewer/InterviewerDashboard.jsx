@@ -5,6 +5,7 @@ import { Video, Calendar, Plus, Users, Search, Code2, Award, Clock, Sparkles, Ch
 import API from '../../services/api';
 import { addLiveRoomNotification } from '../../utils/notifications';
 import { filterProblems } from '../../utils/problemSearch';
+import { getUserScopedHistoryKey, isPlaceholderSession, isSessionVisibleInUpcomingList, normalizeQuestionCount, resolveParticipantEmail, resolveParticipantName } from '../../utils/sessionAccess';
 
 export const InterviewerDashboard = () => {
   const { user } = useAuth();
@@ -21,6 +22,7 @@ export const InterviewerDashboard = () => {
   const [selectedProblems, setSelectedProblems] = useState([]);
   const [scheduledDate, setScheduledDate] = useState('');
   const [durationMinutes, setDurationMinutes] = useState('45');
+  const [questionCount, setQuestionCount] = useState(1);
   const [toastMessage, setToastMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -43,23 +45,81 @@ export const InterviewerDashboard = () => {
     fetchInterviews();
     fetchPreviousInterviews();
 
+    const intervalId = setInterval(() => {
+      fetchInterviews();
+      fetchPreviousInterviews();
+    }, 30000);
+
     const handleReportUpdate = () => {
       fetchInterviews();
       fetchPreviousInterviews();
     };
 
     window.addEventListener('interviewReportUpdated', handleReportUpdate);
-    return () => window.removeEventListener('interviewReportUpdated', handleReportUpdate);
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('interviewReportUpdated', handleReportUpdate);
+    };
   }, []);
 
   const fetchInterviews = async () => {
     try {
       const res = await API.get('/interviews/my');
       if (res.data.success && Array.isArray(res.data.data)) {
-        setInterviews(res.data.data.filter((interview) => !(interview.status === 'completed' || interview.status === 'finished')));
+        setInterviews(res.data.data.filter(isSessionVisibleInUpcomingList));
       }
     } catch (e) {
       console.warn('Using initial local active candidate rooms set.');
+    }
+  };
+
+  const handleCancelInterview = async (interview) => {
+    const interviewId = interview?._id || interview?.roomId || interview?.sessionId;
+    if (!interviewId || !window.confirm(`Cancel this interview for ${interview?.candidateName || 'the candidate'}?`)) {
+      return;
+    }
+
+    try {
+      const res = await API.put(`/interviews/${interviewId}/cancel`);
+      if (res.data.success) {
+        const cancelledEntry = {
+          _id: interviewId,
+          roomId: interview?.roomId || interviewId,
+          title: interview?.title || 'Interview Session',
+          status: 'cancelled',
+          cancelledAt: new Date().toISOString(),
+          candidateName: interview?.candidateName || 'Candidate',
+          role: interview?.role || 'Software Engineer',
+          cancellationMessage: 'This session was canceled by you.',
+          cancelReason: 'This session was canceled by you.',
+        };
+
+        const storedCancelled = (() => {
+          try {
+            const key = getUserScopedHistoryKey('cancelledInterviewHistory', user);
+            const raw = JSON.parse(localStorage.getItem(key) || '[]');
+            return Array.isArray(raw) ? raw : [];
+          } catch {
+            return [];
+          }
+        })();
+
+        const nextCancelled = [cancelledEntry, ...storedCancelled.filter((item) => String(item._id || item.roomId || '') !== String(interviewId))].slice(0, 20);
+        localStorage.setItem(getUserScopedHistoryKey('cancelledInterviewHistory', user), JSON.stringify(nextCancelled));
+        setPreviousInterviews((prev) => {
+          const deduped = [...prev.filter((item) => String(item?._id || item?.reportId || item?.roomId || '') !== String(interviewId)), cancelledEntry];
+          return deduped.slice(0, 20);
+        });
+        window.dispatchEvent(new CustomEvent('interviewReportUpdated'));
+
+        setInterviews((prev) => prev.filter((item) => (item?._id || item?.roomId || item?.sessionId) !== interviewId));
+        setToastMessage('Interview cancelled and removed from active rooms.');
+        setTimeout(() => setToastMessage(''), 4000);
+      }
+    } catch (error) {
+      console.error('Failed to cancel interview', error);
+      setToastMessage('Unable to cancel the interview right now.');
+      setTimeout(() => setToastMessage(''), 4000);
     }
   };
 
@@ -69,21 +129,34 @@ export const InterviewerDashboard = () => {
       const serverReports = res.data?.success && Array.isArray(res.data.data) ? res.data.data : [];
       const localSavedReports = (() => {
         try {
-          const raw = JSON.parse(localStorage.getItem('previousInterviewReports') || '[]');
+          const key = getUserScopedHistoryKey('previousInterviewReports', user);
+          const raw = JSON.parse(localStorage.getItem(key) || '[]');
+          return Array.isArray(raw) ? raw : [];
+        } catch {
+          return [];
+        }
+      })();
+      const cancelledReports = (() => {
+        try {
+          const key = getUserScopedHistoryKey('cancelledInterviewHistory', user);
+          const raw = JSON.parse(localStorage.getItem(key) || '[]');
           return Array.isArray(raw) ? raw : [];
         } catch {
           return [];
         }
       })();
 
-      const mergedReports = [...localSavedReports, ...serverReports].reduce((acc, report) => {
-        if (!report || !report._id) return acc;
-        const key = String(report._id);
+      const mergedReports = [...localSavedReports, ...cancelledReports, ...serverReports].reduce((acc, report) => {
+        if (!report || (!report._id && !report.reportId && !report.roomId)) return acc;
+        if (isPlaceholderSession(report)) return acc;
+        const key = String(report._id || report.reportId || report.roomId || '');
         const normalizedReport = {
           ...report,
+          _id: report._id || report.reportId || report.roomId || key || `report_${Date.now()}`,
+          status: String(report.status || report.state || (report.cancelledAt ? 'cancelled' : 'completed')).toLowerCase(),
           title: report.title || report.interviewTitle || report.topic || report.problemTitle || 'Interview Report',
         };
-        if (!acc.some((item) => String(item._id) === key)) {
+        if (key && !acc.some((item) => String(item._id || item.reportId || item.roomId || '') === key)) {
           acc.push(normalizedReport);
         }
         return acc;
@@ -114,6 +187,7 @@ export const InterviewerDashboard = () => {
     setIsSubmitting(true);
     try {
       const problemsToUse = selectedProblems.length > 0 ? selectedProblems : [selectedProblem];
+      const normalizedQuestionCount = normalizeQuestionCount(questionCount, problemsToUse.length || 1);
       const payload = {
         title: interviewTitle || (selectedProblems.length > 0 ? 'Multi-Problem Technical Round' : `${selectedProblem} Interview`),
         type: 'one-to-one',
@@ -124,6 +198,8 @@ export const InterviewerDashboard = () => {
         problems: problemsToUse,
         scheduledAt: scheduledDate ? new Date(scheduledDate).toISOString() : new Date().toISOString(),
         durationMinutes: parseInt(durationMinutes, 10) || 45,
+        questionCount: normalizedQuestionCount,
+        totalQuestions: normalizedQuestionCount,
         sendViaEmail,
       };
 
@@ -138,7 +214,7 @@ export const InterviewerDashboard = () => {
             ? `A live room invite was sent to ${candidateEmail} and is now visible in the candidate notification bell.`
             : `Interviewer shared a live room link for ${candidateName || candidateEmail || 'your next session'}.`,
           actionUrl: `/live-room/${newInterview.roomId}`,
-          recipientEmail: sendViaEmail ? candidateEmail : '',
+          recipientEmail: candidateEmail || '',
           candidateEmail,
           candidateName,
         });
@@ -148,6 +224,7 @@ export const InterviewerDashboard = () => {
     } catch (err) {
       const mockRoomId = `room-${Math.random().toString(36).substring(2, 9)}`;
       const problemsToUse = selectedProblems.length > 0 ? selectedProblems : [selectedProblem];
+      const normalizedQuestionCount = normalizeQuestionCount(questionCount, problemsToUse.length || 1);
       const fallbackInterview = {
         _id: 'int_' + Date.now(),
         title: interviewTitle || (selectedProblems.length > 0 ? 'Multi-Problem Technical Round' : `${selectedProblem} Interview`),
@@ -159,6 +236,8 @@ export const InterviewerDashboard = () => {
         status: 'Scheduled',
         problemTitle: selectedProblems.length > 0 ? selectedProblems.join(', ') : selectedProblem,
         problems: problemsToUse,
+        questionCount: normalizedQuestionCount,
+        totalQuestions: normalizedQuestionCount,
       };
       setInterviews((prev) => [fallbackInterview, ...prev]);
       setToastMessage(`Interview scheduled! Room Link: /live-room/${mockRoomId}`);
@@ -168,7 +247,7 @@ export const InterviewerDashboard = () => {
           ? `A live room invite was sent to ${candidateEmail} and is now visible in the candidate notification bell.`
           : `Interviewer shared a live room link for ${candidateName || candidateEmail || 'your next session'}.`,
         actionUrl: `/live-room/${mockRoomId}`,
-        recipientEmail: sendViaEmail ? candidateEmail : '',
+        recipientEmail: candidateEmail || '',
         candidateEmail,
         candidateName,
       });
@@ -181,6 +260,7 @@ export const InterviewerDashboard = () => {
       setCandidateEmail('');
       setSendViaEmail(true);
       setSelectedProblems([]);
+      setQuestionCount(1);
       setTimeout(() => setToastMessage(''), 6000);
     }
   };
@@ -755,8 +835,8 @@ export const InterviewerDashboard = () => {
                 const candidateRoleName = item.role || 'Software Engineer';
                 const timeDisplay = item.time || item.scheduledAt ? (item.time || new Date(item.scheduledAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) : 'Scheduled';
                 const sessionId = item.sessionId || `sess_${Math.random().toString(36).substr(2, 9)}`;
-                const questionsAsked = item.questionsAsked || Math.floor(Math.random() * 3) + 1;
-                const totalQuestions = item.totalQuestions || 3;
+                const questionsAsked = normalizeQuestionCount(item.questionsAsked ?? item.questionCount ?? item.totalQuestions ?? 1, item.totalQuestions ?? item.questionCount ?? 1);
+                const totalQuestions = normalizeQuestionCount(item.totalQuestions ?? item.questionCount ?? questionsAsked ?? 1, questionsAsked);
                 const isCompleted = statusStr.toLowerCase() === 'completed' || statusStr.toLowerCase() === 'finished';
 
                 return (
@@ -805,6 +885,16 @@ export const InterviewerDashboard = () => {
                         <Copy className="w-3.5 h-3.5" /> Link
                       </button>
 
+                      {!isCompleted && (
+                        <button
+                          type="button"
+                          onClick={() => handleCancelInterview(item)}
+                          className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 text-xs font-semibold transition-all"
+                        >
+                          Cancel
+                        </button>
+                      )}
+
                       {isCompleted ? (
                         <button
                           disabled
@@ -831,51 +921,83 @@ export const InterviewerDashboard = () => {
           <DraggablePanel panelId="previousReports" title="Previous Interview Reports" icon={Award}>
             <div className="flex items-center justify-between border-b border-gray-200 pb-3 mb-4">
               <span className="text-xs font-mono px-2.5 py-0.5 rounded-full bg-gray-100 border border-gray-200 text-purple-600 font-bold">
-                {previousInterviews.length} Completed
+                {previousInterviews.length} Entries
               </span>
             </div>
 
             <div className="space-y-3">
               {previousInterviews.length === 0 ? (
                 <div className="p-5 rounded-xl bg-slate-50 border border-dashed border-slate-300 text-sm text-slate-600">
-                  No completed interviews have been saved yet.
+                  No previous interviews or cancellations have been saved yet.
                 </div>
               ) : (
-                previousInterviews.map((interview) => (
-                  <div
-                    key={interview._id}
-                    className="p-4 rounded-xl bg-gray-50 border border-gray-200 hover:border-purple-300 transition-all cursor-pointer"
-                    onClick={() => handleViewReport(interview)}
-                  >
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex-1">
-                        <h4 className="text-sm font-bold text-gray-900 mb-2">{interview.title || interview.interviewTitle || interview.topic || interview.problemTitle || 'Interview Report'}</h4>
-                        <p className="text-xs text-gray-600 mb-2">
-                          Candidate: <strong className="text-gray-800">{interview.candidateName}</strong> ({interview.role})
-                        </p>
-                        <div className="flex items-center gap-3 text-xs text-gray-500">
-                          <div className="flex items-center gap-1">
-                            <Clock className="w-3 h-3 text-amber-500" />
-                            <span>{interview.duration}</span>
+                previousInterviews.map((interview) => {
+                  const isCancelled = String(interview.status || '').toLowerCase() === 'cancelled';
+                  const cancellationText = interview.cancellationMessage || interview.cancelReason || interview.description || 'This session was canceled by you.';
+                  const candidateName = resolveParticipantName(interview, 'Candidate');
+                  const candidateEmail = resolveParticipantEmail(interview, 'Not provided');
+                  const sessionDateTime = interview.completedDate || interview.interviewDate || interview.scheduledAt || interview.createdAt || interview.startedAt || interview.time || interview.cancelledAt || interview.canceledAt;
+                  const questionCount = Number(interview.questionsAsked || interview.totalQuestions || interview.questionMetrics?.length || 0);
+
+                  return (
+                    <div
+                      key={interview._id}
+                      className="p-4 rounded-xl bg-gray-50 border border-gray-200 hover:border-purple-300 transition-all cursor-pointer"
+                      onClick={() => handleViewReport(interview)}
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${isCancelled ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                              {isCancelled ? 'Cancelled' : (interview.status || 'Completed')}
+                            </span>
                           </div>
-                          <div className="flex items-center gap-1">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-                            <span>{interview.questionsAsked || interview.totalQuestions || 0}/{interview.totalQuestions || interview.questionsAsked || 0} Questions</span>
+                          <h4 className="text-sm font-bold text-gray-900 mb-2">{interview.title || interview.interviewTitle || interview.topic || interview.problemTitle || 'Interview Report'}</h4>
+                          {isCancelled && (
+                            <p className="text-xs text-rose-600 font-semibold mb-2">{cancellationText}</p>
+                          )}
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-gray-600 mb-2">
+                            <div><span className="font-semibold uppercase tracking-wide">Candidate:</span> {candidateName}</div>
+                            <div><span className="font-semibold uppercase tracking-wide">Email:</span> {candidateEmail}</div>
+                            <div><span className="font-semibold uppercase tracking-wide">Date/Time:</span> {sessionDateTime ? new Date(sessionDateTime).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Not available'}</div>
+                            <div><span className="font-semibold uppercase tracking-wide">Questions:</span> {questionCount}</div>
+                          </div>
+
+                          <div className="flex items-center gap-3 text-xs text-gray-500">
+                            <div className="flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-amber-500" />
+                              <span>{interview.duration || (isCancelled ? 'Cancelled' : 'N/A')}</span>
+                            </div>
+                            {!isCancelled && (
+                              <div className="flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                                <span>{interview.questionsAsked || interview.totalQuestions || 0}/{interview.totalQuestions || interview.questionsAsked || 0} Questions</span>
+                              </div>
+                            )}
                           </div>
                         </div>
-                      </div>
-                      <div className="flex flex-col items-end gap-2">
-                        <div className={`px-3 py-1 rounded-lg text-sm font-bold ${getScoreColor(Number(interview.overallScore || 0))}`}>
-                          {interview.overallScore || 0}%
-                        </div>
-                        <div className="flex items-center gap-1 text-xs text-gray-500">
-                          <Award className="w-3 h-3 text-amber-500" />
-                          <span>{interview.feedback?.rating || '0.0'}/5.0</span>
+                        <div className="flex flex-col items-end gap-2">
+                          {isCancelled ? (
+                            <div className="px-3 py-1 rounded-lg text-sm font-bold bg-rose-100 text-rose-700">
+                              Cancelled
+                            </div>
+                          ) : (
+                            <div className={`px-3 py-1 rounded-lg text-sm font-bold ${getScoreColor(Number(interview.overallScore || 0))}`}>
+                              {interview.overallScore || 0}%
+                            </div>
+                          )}
+                          {!isCancelled && (
+                            <div className="flex items-center gap-1 text-xs text-gray-500">
+                              <Award className="w-3 h-3 text-amber-500" />
+                              <span>{interview.feedback?.rating || '0.0'}/5.0</span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </DraggablePanel>
@@ -1114,6 +1236,8 @@ export const InterviewerDashboard = () => {
                   <input
                     type="text"
                     required
+                    autoComplete="off"
+                    name="candidate_name"
                     value={candidateName}
                     onChange={(e) => setCandidateName(e.target.value)}
                     placeholder="Candidate name"
@@ -1125,6 +1249,8 @@ export const InterviewerDashboard = () => {
                   <input
                     type="email"
                     required
+                    autoComplete="off"
+                    name="candidate_email"
                     value={candidateEmail}
                     onChange={(e) => setCandidateEmail(e.target.value)}
                     placeholder="Email address"
@@ -1221,6 +1347,18 @@ export const InterviewerDashboard = () => {
                     <option value="30">30 Minutes</option>
                     <option value="45">45 Minutes</option>
                     <option value="60">60 Minutes</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-gray-700 block mb-1">Question Count</label>
+                  <select
+                    value={questionCount}
+                    onChange={(e) => setQuestionCount(Number(e.target.value) || 1)}
+                    className="w-full bg-white border border-gray-300 rounded-xl px-3 py-2 text-xs text-gray-900 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 8, 10].map((count) => (
+                      <option key={count} value={count}>{count} {count === 1 ? 'Question' : 'Questions'}</option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -1387,10 +1525,10 @@ export const InterviewerDashboard = () => {
                 <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
                   <h6 className="text-xs font-bold text-gray-900 mb-2">Chat Transcript</h6>
                   <div className="space-y-2 max-h-56 overflow-y-auto">
-                    {selectedReportDetails.chatMessages.length === 0 ? (
+                    {(selectedReportDetails.chatMessages || []).length === 0 ? (
                       <p className="text-xs text-gray-600">No chat transcript captured.</p>
                     ) : (
-                      selectedReportDetails.chatMessages.map((msg, idx) => (
+                      (selectedReportDetails.chatMessages || []).map((msg, idx) => (
                         <div key={`${msg.sender || 'message'}-${idx}`} className="rounded-lg bg-white border border-gray-200 p-2">
                           <div className="text-[10px] font-bold uppercase text-indigo-600 mb-1">{msg.sender || msg.role || 'Participant'}</div>
                           <div className="text-xs text-gray-700 whitespace-pre-wrap">{msg.text || msg.message || msg.content || 'No content'}</div>

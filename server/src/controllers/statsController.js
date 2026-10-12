@@ -115,7 +115,12 @@ export const interviewsActivity = async (req, res, next) => {
     ]).exec();
 
     const statusAgg = await Interview.aggregate([
-      { $match: { $or: [{ candidateId: uid }, { interviewerId: uid }] } },
+      {
+        $match: {
+          $or: [{ candidateId: uid }, { interviewerId: uid }],
+          $expr: { $ne: ['$candidateId', '$interviewerId'] },
+        },
+      },
       { $group: { _id: '$status', count: { $sum: 1 } } },
     ]).exec();
 

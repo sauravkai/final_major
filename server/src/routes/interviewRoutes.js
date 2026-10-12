@@ -4,6 +4,7 @@ import {
   getUserInterviews,
   getUserInterviewReports,
   getInterviewByRoomId,
+  cancelInterview,
   endInterview,
   getInterviewReport,
 } from '../controllers/interviewController.js';
@@ -15,6 +16,7 @@ router.post('/', protect, createInterview);
 router.get('/my', protect, getUserInterviews);
 router.get('/reports', protect, getUserInterviewReports);
 router.get('/room/:roomId', protect, getInterviewByRoomId);
+router.put('/:id/cancel', protect, cancelInterview);
 router.put('/:id/end', protect, endInterview);
 router.get('/:interviewId/report', protect, getInterviewReport);
 

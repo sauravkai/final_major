@@ -444,54 +444,83 @@ export const ResultsReportPage = () => {
         </div>
       </div>
 
-      {/* Interview Evidence */}
+      {/* Interview Evidence: Notes & Chat */}
       <div className={`p-6 rounded-2xl border space-y-5 ${isDark ? 'glass-panel border-slate-800' : 'bg-white border-slate-200'}`}>
         <h3 className={`text-sm font-heading font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
-          <FileText className="w-4 h-4 text-violet-500" /> Interview Evidence
+          <FileText className="w-4 h-4 text-violet-500" /> Interview Session Evidence & Notes
         </h3>
 
-        {(report.interviewerNotes || '').trim() && (
-          <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-            <div className={`text-[10px] font-mono uppercase tracking-wide mb-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Interviewer Notes</div>
-            <p className={`text-xs leading-relaxed whitespace-pre-wrap ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{report.interviewerNotes}</p>
+        {/* Interview Notes */}
+        <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+          <div className="flex items-center justify-between mb-2">
+            <span className={`text-[11px] font-mono uppercase tracking-wider font-semibold ${isDark ? 'text-violet-400' : 'text-violet-700'}`}>
+              📝 Interviewer & Session Notes
+            </span>
           </div>
-        )}
+          {(report.interviewerNotes || '').trim() ? (
+            <p className={`text-xs leading-relaxed whitespace-pre-wrap font-mono ${isDark ? 'text-slate-300' : 'text-slate-800'}`}>
+              {report.interviewerNotes}
+            </p>
+          ) : (
+            <p className={`text-xs italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+              No interviewer notes were recorded during this session.
+            </p>
+          )}
+        </div>
 
-        {Array.isArray(report.chatMessages) && report.chatMessages.length > 0 && (
-          <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-            <div className={`text-[10px] font-mono uppercase tracking-wide mb-3 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Chat Between Them</div>
-            <div className="space-y-2">
-              {report.chatMessages.map((message, idx) => {
-                const sender = message?.sender || message?.role || message?.speaker || message?.author || 'Participant';
+        {/* Chat Messages */}
+        <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+          <div className="flex items-center justify-between mb-3">
+            <span className={`text-[11px] font-mono uppercase tracking-wider font-semibold ${isDark ? 'text-indigo-400' : 'text-indigo-700'}`}>
+              💬 Session Chat Transcript
+            </span>
+            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${isDark ? 'bg-indigo-950 text-indigo-300 border border-indigo-800/60' : 'bg-indigo-100 text-indigo-700'}`}>
+              {(Array.isArray(report.chatMessages) && report.chatMessages.length)
+                ? `${report.chatMessages.length} messages`
+                : (Array.isArray(report.transcriptHistory) && report.transcriptHistory.length ? `${report.transcriptHistory.length} messages` : '0 messages')}
+            </span>
+          </div>
+
+          {(Array.isArray(report.chatMessages) && report.chatMessages.length > 0) || (Array.isArray(report.transcriptHistory) && report.transcriptHistory.length > 0) ? (
+            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+              {((Array.isArray(report.chatMessages) && report.chatMessages.length > 0) ? report.chatMessages : report.transcriptHistory).map((message, idx) => {
+                const sender = message?.sender || message?.speaker || message?.role || message?.author || 'Participant';
                 const text = message?.text || message?.message || message?.content || '';
+                const time = message?.timestamp || message?.time || '';
+                const role = String(message?.role || '').toLowerCase();
+                const isInterviewer = role === 'interviewer' || sender.toLowerCase().includes('interviewer');
+
                 return (
-                  <div key={idx} className={`rounded-lg border p-2 ${isDark ? 'border-slate-700 bg-slate-950/60' : 'border-slate-200 bg-white'}`}>
-                    <div className={`text-[10px] font-mono uppercase mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{sender}</div>
-                    <p className={`text-xs whitespace-pre-wrap ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{text || 'No message text'}</p>
+                  <div key={idx} className={`rounded-lg border p-2.5 transition-colors ${
+                    isInterviewer
+                      ? isDark ? 'border-amber-900/40 bg-amber-950/20' : 'border-amber-200 bg-amber-50/60'
+                      : isDark ? 'border-slate-800 bg-slate-950/70' : 'border-slate-200 bg-white'
+                  }`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={`text-[10px] font-mono uppercase font-bold tracking-wide ${
+                        isInterviewer ? 'text-amber-400' : (isDark ? 'text-indigo-300' : 'text-indigo-600')
+                      }`}>
+                        {sender} {isInterviewer ? '(Interviewer)' : ''}
+                      </span>
+                      {time && (
+                        <span className={`text-[9px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                          {time}
+                        </span>
+                      )}
+                    </div>
+                    <p className={`text-xs whitespace-pre-wrap leading-relaxed ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                      {text || 'No message text'}
+                    </p>
                   </div>
                 );
               })}
             </div>
-          </div>
-        )}
-
-        {(!Array.isArray(report.chatMessages) || report.chatMessages.length === 0) && Array.isArray(report.transcriptHistory) && report.transcriptHistory.length > 0 && (
-          <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-            <div className={`text-[10px] font-mono uppercase tracking-wide mb-3 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Session Chat Transcript</div>
-            <div className="space-y-2">
-              {report.transcriptHistory.map((message, idx) => {
-                const sender = message?.sender || message?.role || message?.speaker || message?.author || 'Participant';
-                const text = message?.text || message?.message || message?.content || '';
-                return (
-                  <div key={idx} className={`rounded-lg border p-2 ${isDark ? 'border-slate-700 bg-slate-950/60' : 'border-slate-200 bg-white'}`}>
-                    <div className={`text-[10px] font-mono uppercase mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{sender}</div>
-                    <p className={`text-xs whitespace-pre-wrap ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{text || 'No message text'}</p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+          ) : (
+            <p className={`text-xs italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+              No chat messages were exchanged during this session.
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Question-by-Question Breakdown */}

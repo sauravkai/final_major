@@ -5,13 +5,30 @@ const interviewResultSchema = new mongoose.Schema(
     interviewId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Interview',
-      required: true,
-      unique: true,
+      default: null,
+      index: true,
+    },
+    roomId: {
+      type: String,
+      default: '',
     },
     candidateId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
+      default: null,
+      index: true,
+    },
+    candidateEmail: {
+      type: String,
+      default: '',
+      lowercase: true,
+      trim: true,
+    },
+    interviewerEmail: {
+      type: String,
+      default: '',
+      lowercase: true,
+      trim: true,
     },
     interviewerId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -44,5 +61,11 @@ const interviewResultSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+interviewResultSchema.index({ candidateId: 1, createdAt: -1 });
+interviewResultSchema.index({ interviewerId: 1, createdAt: -1 });
+interviewResultSchema.index({ candidateEmail: 1, createdAt: -1 });
+interviewResultSchema.index({ interviewerEmail: 1, createdAt: -1 });
+interviewResultSchema.index({ roomId: 1 });
 
 export const InterviewResult = mongoose.model('InterviewResult', interviewResultSchema);

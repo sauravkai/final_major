@@ -11,20 +11,11 @@ const buildChatMessage = (message, sender, role, idOverride) => ({
   timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
 });
 
-const initialMessages = [
-  {
-    id: 'init',
-    text: 'Welcome to the interview room! Audio/Video and collaborative code sync are active.',
-    sender: 'System',
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-  },
-];
-
 export const ChatPanel = ({ roomId, messages = [], onMessagesChange = () => {} }) => {
   const { socket } = useSocket();
   const { user } = useAuth();
   const [inputMessage, setInputMessage] = useState('');
-  const [chatMessages, setChatMessages] = useState(messages.length ? messages : initialMessages);
+  const [chatMessages, setChatMessages] = useState(messages.length ? messages : []);
 
   useEffect(() => {
     if (messages.length) {
@@ -45,6 +36,21 @@ export const ChatPanel = ({ roomId, messages = [], onMessagesChange = () => {} }
       return [...prev, msg];
     });
   }, []);
+
+  const getMessageToneClasses = (message) => {
+    const role = String(message?.role || '').trim().toLowerCase();
+    const isCurrentUser = message?.sender === user?.name;
+
+    if (isCurrentUser) {
+      return 'bg-indigo-950/60 border border-indigo-800/40 text-indigo-100 ml-4';
+    }
+
+    if (role === 'interviewer') {
+      return 'bg-amber-950/60 border border-amber-800/40 text-amber-100 mr-4';
+    }
+
+    return 'bg-cyan-950/60 border border-cyan-800/40 text-cyan-100 mr-4';
+  };
 
   useEffect(() => {
     if (!socket) return;
@@ -95,17 +101,13 @@ export const ChatPanel = ({ roomId, messages = [], onMessagesChange = () => {} }
         {chatMessages.map((m) => (
           <div
             key={m.id}
-            className={`p-2 rounded-lg text-xs leading-relaxed ${
-              m.sender === 'System'
-                ? 'bg-slate-900 border border-slate-800 text-slate-400 text-[11px]'
-                : m.sender === user?.name
-                ? 'bg-indigo-950/60 border border-indigo-800/40 text-indigo-200 ml-4'
-                : 'bg-slate-900 border border-slate-800 text-slate-200 mr-4'
-            }`}
+            className={`p-2 rounded-lg text-xs leading-relaxed ${getMessageToneClasses(m)}`}
           >
-            <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 mb-0.5">
-              <span className="font-bold">{m.sender}</span>
-              <span>{m.timestamp}</span>
+            <div className="flex items-center justify-between text-[10px] font-mono mb-0.5">
+              <span className="font-bold">
+                {m.role === 'interviewer' ? 'Interviewer' : m.role === 'candidate' ? 'Candidate' : m.sender}
+              </span>
+              <span className="opacity-80">{m.timestamp}</span>
             </div>
             <p>{m.text}</p>
           </div>

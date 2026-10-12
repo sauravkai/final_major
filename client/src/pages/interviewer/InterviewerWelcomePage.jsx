@@ -187,9 +187,10 @@ export const InterviewerWelcomePage = () => {
                       <div className="text-xs text-slate-500">{new Date(it.scheduledAt || Date.now()).toLocaleString()}</div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <div className={`text-xs px-3 py-1 rounded-full ${it.status && it.status.toLowerCase().includes('in') ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{it.status || 'scheduled'}</div>
-                      {it.status && it.status.toLowerCase().includes('in') && (
-                        <Link to={`/live-room/${it.roomId || it._id}`} className="text-indigo-600 text-sm font-medium">Open Room</Link>
+                      {!['completed', 'finished', 'cancelled', 'canceled', 'ended', 'closed'].includes(String(it.status || '').toLowerCase()) && (
+                        <Link to={`/live-room/${it.roomId || it._id}`} className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition-all">
+                          Enter Room
+                        </Link>
                       )}
                     </div>
                   </li>

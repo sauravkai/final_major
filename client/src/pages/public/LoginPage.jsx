@@ -33,8 +33,14 @@ export const LoginPage = () => {
     }
   };
 
-  const handleQuickDemo = (role) => {
-    loginAsDemoRole(role);
+  const handleQuickDemo = async (role) => {
+    const result = await loginAsDemoRole(role);
+
+    if (!result?.success) {
+      setError(result?.message || 'Demo login is unavailable right now.');
+      return;
+    }
+
     if (role === 'candidate') navigate('/dashboard');
     else if (role === 'interviewer') navigate('/interviewer/dashboard');
     else if (role === 'admin') navigate('/admin/dashboard');

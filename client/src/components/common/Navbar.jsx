@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
-import { getNotificationsForUser, markNotificationRead } from '../../utils/notifications';
+import { getNotificationsForUser, markNotificationRead, addLiveRoomNotification } from '../../utils/notifications';
+import { useSocket } from '../../context/SocketContext';
+import API from '../../services/api';
 import {
   Code2,
   Bot,
@@ -24,6 +26,7 @@ import {
 export const Navbar = () => {
   const { user, logout, loginAsDemoRole, isAuthenticated } = useAuth();
   const { isDark, toggleTheme } = useTheme();
+  const { socket } = useSocket();
   const navigate = useNavigate();
   const location = useLocation();
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
@@ -49,6 +52,45 @@ export const Navbar = () => {
 
     syncNotifications();
 
+    // Fetch user's scheduled interviews from server and sync missing notifications
+    const syncServerInterviews = async () => {
+      if (!isAuthenticated || !user?.email) return;
+      try {
+        const res = await API.get('/interviews/my');
+        if (res.data?.success && Array.isArray(res.data.data)) {
+          const currentUserEmail = normalizeEmail(user.email);
+          const currentUserId = String(user._id || user.id || '');
+          const existing = getNotificationsForUser(currentUserEmail);
+
+          res.data.data.forEach((intv) => {
+            const cEmail = normalizeEmail(intv.candidateEmail || intv.candidateId?.email || '');
+            const cId = String(intv.candidateId?._id || intv.candidateId || '');
+            const isCandidate = (currentUserEmail && cEmail === currentUserEmail) || (currentUserId && cId === currentUserId);
+
+            if (isCandidate && intv.roomId && intv.status !== 'completed' && intv.status !== 'cancelled') {
+              const alreadyHas = existing.some((n) => n.roomId === intv.roomId);
+              if (!alreadyHas) {
+                addLiveRoomNotification(intv.roomId, {
+                  title: 'Interview Invitation',
+                  message: `Upcoming interview scheduled: ${intv.title || 'Technical Round'} with ${intv.interviewerName || 'Interviewer'}`,
+                  roomId: intv.roomId,
+                  recipientEmail: currentUserEmail,
+                  candidateEmail: currentUserEmail,
+                  candidateName: intv.candidateName || user.name || '',
+                  actionUrl: `/live-room/${intv.roomId}`,
+                });
+              }
+            }
+          });
+          syncNotifications();
+        }
+      } catch (err) {
+        // Silently handle offline/error
+      }
+    };
+
+    syncServerInterviews();
+
     const handleStorageSync = () => syncNotifications();
     const handleInviteToast = (event) => {
       const notification = event.detail;
@@ -68,15 +110,44 @@ export const Navbar = () => {
       }, 7000);
     };
 
+    const handleSocketScheduled = (data) => {
+      if (!data) return;
+      const currentUserEmail = normalizeEmail(user?.email);
+      const targetEmail = normalizeEmail(data.recipientEmail || data.candidateEmail || data.email);
+      const shouldNotify = !currentUserEmail || !targetEmail || targetEmail === currentUserEmail;
+
+      if (shouldNotify && data.roomId) {
+        addLiveRoomNotification(data.roomId, {
+          title: 'Interview Scheduled',
+          message: data.message || `You have been scheduled for an interview: ${data.title || 'Technical Round'}`,
+          roomId: data.roomId,
+          recipientEmail: targetEmail || currentUserEmail,
+          candidateEmail: targetEmail || currentUserEmail,
+          candidateName: data.candidateName || user?.name || '',
+          actionUrl: data.actionUrl || `/live-room/${data.roomId}`,
+        });
+        syncNotifications();
+      }
+    };
+
     window.addEventListener('storage', handleStorageSync);
+    window.addEventListener('notification-storage-sync', handleStorageSync);
     window.addEventListener('live-room-notification', handleInviteToast);
+
+    if (socket) {
+      socket.on('interview-scheduled', handleSocketScheduled);
+    }
 
     return () => {
       clearInviteToastTimer();
       window.removeEventListener('storage', handleStorageSync);
+      window.removeEventListener('notification-storage-sync', handleStorageSync);
       window.removeEventListener('live-room-notification', handleInviteToast);
+      if (socket) {
+        socket.off('interview-scheduled', handleSocketScheduled);
+      }
     };
-  }, [user?.email]);
+  }, [user?.email, user?._id, isAuthenticated, socket]);
 
   const unreadCount = notifications.filter((item) => !item.read).length;
 
@@ -90,9 +161,14 @@ export const Navbar = () => {
     }
   };
 
-  const handleDemoSwitch = (role) => {
-    loginAsDemoRole(role);
+  const handleDemoSwitch = async (role) => {
+    const result = await loginAsDemoRole(role);
     setRoleMenuOpen(false);
+
+    if (!result?.success) {
+      return;
+    }
+
     if (role === 'candidate') navigate('/dashboard');
     else if (role === 'interviewer') navigate('/interviewer/dashboard');
     else if (role === 'admin') navigate('/admin/dashboard');

@@ -19,7 +19,9 @@ export const WebRTCVideoCall = ({
   candidateName = '',
   interviewerName = '',
   candidateTitle = '',
+  candidateEmail = '',
   interviewerTitle = '',
+  interviewerEmail = '',
   viewerRole = 'candidate',
   roomId = '',
   onEndInterview,
@@ -28,55 +30,296 @@ export const WebRTCVideoCall = ({
   const normalizedViewerRole = String(viewerRole || '').trim().toLowerCase();
   const isViewerInterviewer = normalizedViewerRole === 'interviewer';
 
-  const displayCandidateName = candidateName || 'Candidate';
-  const displayInterviewerName = interviewerName || 'Interviewer';
-  const displayCandidateTitle = candidateTitle || 'Candidate';
-  const displayInterviewerTitle = interviewerTitle || 'Senior Interviewer';
+  const displayCandidateName = candidateName || '';
+  const displayInterviewerName = interviewerName || '';
+  const displayCandidateTitle = candidateTitle || '';
+  const displayCandidateEmail = candidateEmail || '';
+  const displayInterviewerEmail = interviewerEmail || '';
+  const displayInterviewerTitle = interviewerTitle || '';
   const localLabelName = isViewerInterviewer ? displayInterviewerName : displayCandidateName;
   const localLabelTitle = isViewerInterviewer ? displayInterviewerTitle : displayCandidateTitle;
+  const localLabelEmail = isViewerInterviewer ? displayInterviewerEmail : displayCandidateEmail;
   const remoteLabelName = isViewerInterviewer ? displayCandidateName : displayInterviewerName;
   const remoteLabelTitle = isViewerInterviewer ? displayCandidateTitle : displayInterviewerTitle;
+  const remoteLabelEmail = isViewerInterviewer ? displayCandidateEmail : displayInterviewerEmail;
   const localRoleLabel = isViewerInterviewer ? 'Interviewer' : 'Candidate';
   const remoteRoleLabel = isViewerInterviewer ? 'Candidate' : 'Interviewer';
+  const localRoleNameLabel = localLabelName ? `${localRoleLabel}: ${localLabelName}` : '';
+  const remoteRoleNameLabel = remoteLabelName ? `${remoteRoleLabel}: ${remoteLabelName}` : '';
+  const localMetaLabel = localLabelEmail ? `${localRoleLabel} • ${localLabelEmail}` : localLabelTitle ? `${localRoleLabel} • ${localLabelTitle}` : '';
+  const remoteMetaLabel = remoteLabelEmail ? `${remoteRoleLabel} • ${remoteLabelEmail}` : remoteLabelTitle ? `${remoteRoleLabel} • ${remoteLabelTitle}` : '';
 
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [hasCameraPermission, setHasCameraPermission] = useState(true);
   const [isPeerConnected, setIsPeerConnected] = useState(false);
+  const [hasRemoteStream, setHasRemoteStream] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(true);
   const [layoutMode, setLayoutMode] = useState('stacked'); // 'stacked' | 'grid'
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const screenStreamRef = useRef(null);
   const peerConnectionRef = useRef(null);
+  const peerSocketIdRef = useRef(null);
+  const localTracksAttachedRef = useRef(false);
+  const makingOfferRef = useRef(false);
+  const ignoreOfferRef = useRef(false);
+  const iceCandidatesQueueRef = useRef([]);
+
+  const isPolite = normalizedViewerRole === 'candidate';
 
   // WebRTC ICE Servers configuration
   const rtcConfig = {
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+    ],
+    iceCandidatePoolSize: 10,
+  };
+
+  const createVirtualStream = (name, role) => {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 360;
+      const ctx = canvas.getContext('2d');
+      let frame = 0;
+
+      const draw = () => {
+        frame++;
+        const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+        grad.addColorStop(0, '#0f172a');
+        grad.addColorStop(1, '#1e1b4b');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const radius = 48 + Math.sin(frame * 0.05) * 4;
+        ctx.beginPath();
+        ctx.arc(canvas.width / 2, canvas.height / 2 - 20, radius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(99, 102, 241, 0.25)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(129, 140, 248, 0.6)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const initials = (name || role || 'Live').slice(0, 2).toUpperCase();
+        ctx.fillText(initials, canvas.width / 2, canvas.height / 2 - 20);
+
+        ctx.font = 'bold 13px monospace';
+        ctx.fillStyle = '#a5b4fc';
+        ctx.fillText(`${name || role} (Camera Active)`, canvas.width / 2, canvas.height / 2 + 50);
+
+        requestAnimationFrame(draw);
+      };
+      draw();
+
+      const stream = canvas.captureStream(30);
+
+      try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const dest = audioCtx.createMediaStreamDestination();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0.0001;
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start();
+        dest.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
+      } catch (_) {}
+
+      return stream;
+    } catch (_) {
+      return new MediaStream();
+    }
+  };
+
+  const replaceOutgoingTrack = async (kind, nextTrack) => {
+    const pc = peerConnectionRef.current;
+    if (!pc || !nextTrack) return false;
+
+    const sender = pc.getSenders().find((candidate) => candidate.track?.kind === kind);
+    if (!sender) return false;
+
+    if (sender.track === nextTrack) return true;
+
+    await sender.replaceTrack(nextTrack);
+    return true;
+  };
+
+  const getActiveLocalStream = () => (isScreenSharing && screenStreamRef.current ? screenStreamRef.current : mediaStreamRef.current);
+
+  const renegotiateAfterTrackSwap = async () => {
+    const pc = peerConnectionRef.current;
+    const remoteSocketId = peerSocketIdRef.current;
+    if (!socket || !roomId || !remoteSocketId || !pc) return;
+    if (pc.signalingState !== 'stable' || makingOfferRef.current) return;
+
+    try {
+      await negotiateWithRemotePeer();
+    } catch (err) {
+      console.warn('WebRTC renegotiation after track swap failed:', err);
+    }
+  };
+
+  const attachLocalTracksToConnection = () => {
+    if (!peerConnectionRef.current || !mediaStreamRef.current) return false;
+
+    const pc = peerConnectionRef.current;
+    mediaStreamRef.current.getTracks().forEach((track) => {
+      const alreadyAdded = pc.getSenders().some((sender) => sender.track === track);
+      if (!alreadyAdded) {
+        pc.addTrack(track, mediaStreamRef.current);
+      }
+    });
+    localTracksAttachedRef.current = true;
+    return true;
+  };
+
+  const ensurePeerConnection = () => {
+    if (!peerConnectionRef.current) {
+      const pc = new RTCPeerConnection(rtcConfig);
+      peerConnectionRef.current = pc;
+
+      pc.ontrack = (event) => {
+        let remoteStream = event.streams?.[0];
+        if (!remoteStream) {
+          if (!remoteVideoRef.current.srcObject) {
+            remoteVideoRef.current.srcObject = new MediaStream();
+          }
+          remoteVideoRef.current.srcObject.addTrack(event.track);
+          remoteStream = remoteVideoRef.current.srcObject;
+        } else if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+        }
+
+        setHasRemoteStream(true);
+        setIsPeerConnected(true);
+
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.play().catch(() => {
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.muted = true;
+              remoteVideoRef.current.play().catch(() => undefined);
+            }
+          });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (['connected', 'completed'].includes(pc.connectionState)) {
+          setIsPeerConnected(true);
+        } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          setIsPeerConnected(false);
+          setHasRemoteStream(false);
+        }
+      };
+
+      pc.onnegotiationneeded = () => {
+        if (peerSocketIdRef.current && peerConnectionRef.current?.signalingState === 'stable') {
+          void negotiateWithRemotePeer();
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && peerSocketIdRef.current) {
+          socket.emit('webrtc-ice-candidate', {
+            roomId,
+            candidate: event.candidate,
+            targetSocketId: peerSocketIdRef.current,
+          });
+        }
+      };
+    }
+
+    return peerConnectionRef.current;
+  };
+
+  const negotiateWithRemotePeer = async () => {
+    const remoteSocketId = peerSocketIdRef.current;
+    const pc = ensurePeerConnection();
+
+    if (!socket || !roomId || !remoteSocketId || !pc) {
+      return;
+    }
+
+    try {
+      makingOfferRef.current = true;
+      attachLocalTracksToConnection();
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
+      if (pc.signalingState !== 'stable') return;
+      await pc.setLocalDescription(offer);
+      socket.emit('webrtc-offer', {
+        roomId,
+        offer: pc.localDescription,
+        targetSocketId: remoteSocketId,
+      });
+    } catch (err) {
+      console.warn('WebRTC offer creation error:', err);
+    } finally {
+      makingOfferRef.current = false;
+    }
   };
 
   useEffect(() => {
     // 1. Request local media stream
     async function setupLocalMedia() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setHasCameraPermission(false);
-        return;
-      }
-
+      let stream = null;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-        mediaStreamRef.current = stream;
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: 'user',
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+          });
+          setHasCameraPermission(true);
+        }
+      } catch (_err) {
+        console.warn('Real webcam unavailable or locked by another window, initializing virtual stream:', _err?.message || _err);
+        let audioTrack = null;
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audioTrack = audioStream.getAudioTracks()[0];
+        } catch (_) {}
+
+        stream = createVirtualStream(localLabelName, localRoleLabel);
+        if (audioTrack) {
+          stream.getAudioTracks().forEach((track) => stream.removeTrack(track));
+          stream.addTrack(audioTrack);
         }
         setHasCameraPermission(true);
-      } catch (_err) {
-        setHasCameraPermission(false);
+      }
+
+      if (!stream) {
+        stream = createVirtualStream(localLabelName, localRoleLabel);
+      }
+
+      mediaStreamRef.current = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      attachLocalTracksToConnection();
+      if (peerSocketIdRef.current) {
+        await negotiateWithRemotePeer();
       }
     }
 
@@ -85,9 +328,11 @@ export const WebRTCVideoCall = ({
     return () => {
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
       }
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
       }
     };
   }, []);
@@ -96,87 +341,129 @@ export const WebRTCVideoCall = ({
   useEffect(() => {
     if (!socket || !roomId) return;
 
-    const createPeerConnection = () => {
-      const pc = new RTCPeerConnection(rtcConfig);
-      peerConnectionRef.current = pc;
+    const connectToRemotePeer = async (remoteSocketId) => {
+      if (!remoteSocketId || remoteSocketId === socket.id) return;
+      peerSocketIdRef.current = remoteSocketId;
+      const pc = ensurePeerConnection();
 
-      // Add local tracks to peer connection
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((track) => {
-          pc.addTrack(track, mediaStreamRef.current);
-        });
-      }
-
-      // Receive remote stream
-      pc.ontrack = (event) => {
-        if (remoteVideoRef.current && event.streams[0]) {
-          remoteVideoRef.current.srcObject = event.streams[0];
-          setIsPeerConnected(true);
-        }
-      };
-
-      // Send ICE candidates to remote peer
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          socket.emit('webrtc-ice-candidate', { roomId, candidate: event.candidate });
-        }
-      };
-
-      return pc;
+      attachLocalTracksToConnection();
+      await negotiateWithRemotePeer();
     };
 
-    socket.on('user-joined-room', async () => {
-      const pc = createPeerConnection();
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('webrtc-offer', { roomId, offer });
-      } catch (err) {
-        console.warn('WebRTC offer creation error:', err);
+    socket.on('room-state-init', ({ participants = [] }) => {
+      const remoteParticipant = participants.find(
+        (participant) => participant?.socketId && participant.socketId !== socket.id,
+      );
+
+      if (remoteParticipant?.socketId) {
+        connectToRemotePeer(remoteParticipant.socketId);
       }
     });
 
-    socket.on('webrtc-offer-received', async ({ offer }) => {
-      const pc = peerConnectionRef.current || createPeerConnection();
+    socket.on('user-joined-room', async ({ participant }) => {
+      const remoteSocketId = participant?.socketId;
+      if (!remoteSocketId || remoteSocketId === socket.id) return;
+
+      await connectToRemotePeer(remoteSocketId);
+    });
+
+    socket.on('user-left-room', () => {
+      setIsPeerConnected(false);
+      setHasRemoteStream(false);
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = null;
+      }
+    });
+
+    socket.on('webrtc-offer-received', async ({ offer, senderSocketId }) => {
+      if (!offer || senderSocketId === socket.id) return;
+
+      peerSocketIdRef.current = senderSocketId;
+      const pc = ensurePeerConnection();
+
       try {
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await pc.createAnswer();
+        const offerCollision = makingOfferRef.current || pc.signalingState !== 'stable';
+        ignoreOfferRef.current = !isPolite && offerCollision;
+        if (ignoreOfferRef.current) {
+          return;
+        }
+
+        attachLocalTracksToConnection();
+        if (offerCollision) {
+          await Promise.all([
+            pc.setLocalDescription({ type: 'rollback' }),
+            pc.setRemoteDescription(new RTCSessionDescription(offer)),
+          ]);
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        }
+
+        // Drain queued ICE candidates
+        while (iceCandidatesQueueRef.current.length > 0) {
+          const candidate = iceCandidatesQueueRef.current.shift();
+          await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => undefined);
+        }
+
+        const answer = await pc.createAnswer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        });
         await pc.setLocalDescription(answer);
-        socket.emit('webrtc-answer', { roomId, answer });
+        socket.emit('webrtc-answer', {
+          roomId,
+          answer: pc.localDescription,
+          targetSocketId: senderSocketId,
+        });
         setIsPeerConnected(true);
       } catch (err) {
-        console.warn('WebRTC answer creation error:', err);
+        console.warn('WebRTC offer processing error:', err);
       }
     });
 
-    socket.on('webrtc-answer-received', async ({ answer }) => {
-      if (peerConnectionRef.current) {
-        try {
-          await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-          setIsPeerConnected(true);
-        } catch (err) {
-          console.warn('WebRTC remote description error:', err);
+    socket.on('webrtc-answer-received', async ({ answer, senderSocketId }) => {
+      if (!answer || senderSocketId === socket.id || !peerConnectionRef.current) return;
+      const pc = peerConnectionRef.current;
+
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        setIsPeerConnected(true);
+
+        // Drain queued ICE candidates
+        while (iceCandidatesQueueRef.current.length > 0) {
+          const candidate = iceCandidatesQueueRef.current.shift();
+          await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => undefined);
         }
+      } catch (err) {
+        console.warn('WebRTC remote description error:', err);
       }
     });
 
-    socket.on('webrtc-ice-candidate-received', async ({ candidate }) => {
-      if (peerConnectionRef.current && candidate) {
-        try {
-          await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch (err) {
+    socket.on('webrtc-ice-candidate-received', async ({ candidate, senderSocketId }) => {
+      if (!candidate || senderSocketId === socket.id || !peerConnectionRef.current) return;
+      const pc = peerConnectionRef.current;
+
+      try {
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } else {
+          iceCandidatesQueueRef.current.push(candidate);
+        }
+      } catch (err) {
+        if (!ignoreOfferRef.current) {
           console.warn('WebRTC ICE candidate error:', err);
         }
       }
     });
 
     return () => {
+      socket.off('room-state-init');
       socket.off('user-joined-room');
+      socket.off('user-left-room');
       socket.off('webrtc-offer-received');
       socket.off('webrtc-answer-received');
       socket.off('webrtc-ice-candidate-received');
     };
-  }, [socket, roomId]);
+  }, [socket, roomId, isPolite]);
 
   // Audio wave pulse animation simulator
   useEffect(() => {
@@ -187,37 +474,85 @@ export const WebRTCVideoCall = ({
   }, []);
 
   const toggleAudio = () => {
-    if (mediaStreamRef.current) {
-      const audioTrack = mediaStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = isAudioMuted;
-      }
+    const nextMuted = !isAudioMuted;
+    setIsAudioMuted(nextMuted);
+    const stream = getActiveLocalStream();
+    if (stream) {
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = !nextMuted;
+      });
     }
-    setIsAudioMuted(!isAudioMuted);
   };
 
   const toggleVideo = () => {
-    if (mediaStreamRef.current) {
-      const videoTrack = mediaStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = isVideoOff;
-      }
+    const nextVideoOff = !isVideoOff;
+    setIsVideoOff(nextVideoOff);
+    const stream = getActiveLocalStream();
+    if (stream) {
+      stream.getVideoTracks().forEach((track) => {
+        track.enabled = !nextVideoOff;
+      });
     }
-    setIsVideoOff(!isVideoOff);
   };
 
   const toggleScreenShare = async () => {
     try {
       if (!isScreenSharing) {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' },
+          audio: true,
+        });
+
+        screenStreamRef.current = screenStream;
+
+        const screenVideoTrack = screenStream.getVideoTracks()[0];
+        const screenAudioTrack = screenStream.getAudioTracks()[0];
+
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = screenStream;
         }
-        setIsScreenSharing(true);
-      } else {
-        if (localVideoRef.current && mediaStreamRef.current) {
-          localVideoRef.current.srcObject = mediaStreamRef.current;
+
+        if (screenVideoTrack) {
+          await replaceOutgoingTrack('video', screenVideoTrack);
         }
+        if (screenAudioTrack) {
+          await replaceOutgoingTrack('audio', screenAudioTrack);
+        }
+
+        await renegotiateAfterTrackSwap();
+        setIsScreenSharing(true);
+
+        screenStream.getVideoTracks().forEach((track) => {
+          track.addEventListener('ended', () => {
+            if (screenStreamRef.current === screenStream && isScreenSharing) {
+              screenStreamRef.current = null;
+              setIsScreenSharing(false);
+              void renegotiateAfterTrackSwap();
+            }
+          }, { once: true });
+        });
+      } else {
+        const cameraStream = mediaStreamRef.current;
+        if (localVideoRef.current && cameraStream) {
+          localVideoRef.current.srcObject = cameraStream;
+        }
+
+        const cameraVideoTrack = cameraStream?.getVideoTracks()[0];
+        const cameraAudioTrack = cameraStream?.getAudioTracks()[0];
+
+        if (cameraVideoTrack) {
+          await replaceOutgoingTrack('video', cameraVideoTrack);
+        }
+        if (cameraAudioTrack) {
+          await replaceOutgoingTrack('audio', cameraAudioTrack);
+        }
+
+        if (screenStreamRef.current) {
+          screenStreamRef.current.getTracks().forEach((track) => track.stop());
+          screenStreamRef.current = null;
+        }
+
+        await renegotiateAfterTrackSwap();
         setIsScreenSharing(false);
       }
     } catch (e) {
@@ -261,10 +596,10 @@ export const WebRTCVideoCall = ({
             ref={remoteVideoRef}
             autoPlay
             playsInline
-            className={`w-full h-full object-cover ${isPeerConnected ? 'block' : 'hidden'}`}
+            className={`w-full h-full object-cover ${(hasRemoteStream || isPeerConnected) ? 'block' : 'hidden'}`}
           />
 
-          {!isPeerConnected && (
+          {!hasRemoteStream && !isPeerConnected && (
             <div className="flex flex-col items-center justify-center p-4 text-center space-y-2">
               <div className="relative">
                 <div className={`w-16 h-16 rounded-full bg-purple-600/30 border-2 border-purple-500/50 flex items-center justify-center shadow-lg shadow-purple-500/20 ${
@@ -276,10 +611,13 @@ export const WebRTCVideoCall = ({
               </div>
 
               <div className="space-y-0.5">
-                <h4 className="text-xs font-bold text-slate-100">{remoteLabelName}</h4>
+                <h4 className="text-xs font-bold text-slate-100">{remoteRoleNameLabel}</h4>
                 <p className="text-[10px] text-emerald-400 font-mono flex items-center justify-center gap-1">
                   <Shield className="w-3 h-3" /> {remoteRoleLabel}
                 </p>
+                {remoteLabelEmail && (
+                  <p className="text-[9px] text-slate-300 font-mono break-all">{remoteLabelEmail}</p>
+                )}
               </div>
 
               {/* Animated Audio Waveform Indicator */}
@@ -299,9 +637,13 @@ export const WebRTCVideoCall = ({
           <div className="absolute bottom-2 left-2 px-2.5 py-1 rounded-lg bg-slate-950/80 backdrop-blur border border-slate-800/80 text-[10px] font-mono text-slate-200 shadow-md">
             <div className="flex items-center gap-1.5">
               <Volume2 className="w-3 h-3 text-emerald-400 animate-pulse" />
-              <span className="font-semibold">{remoteLabelName}</span>
+              <span className="font-semibold">{remoteRoleNameLabel}</span>
             </div>
-            <div className="text-[9px] text-slate-300 mt-0.5">{remoteRoleLabel} • {remoteLabelTitle}</div>
+            {remoteLabelEmail ? (
+              <div className="text-[9px] text-slate-300 mt-0.5 break-all">{remoteLabelEmail}</div>
+            ) : (
+              <div className="text-[9px] text-slate-300 mt-0.5">{remoteRoleLabel} • {remoteLabelTitle}</div>
+            )}
           </div>
         </div>
 
@@ -321,10 +663,13 @@ export const WebRTCVideoCall = ({
                 <User className="w-8 h-8 text-indigo-300" />
               </div>
               <div className="space-y-0.5">
-                <h4 className="text-xs font-bold text-slate-200">{localLabelName} {normalizedViewerRole === 'candidate' ? '(You)' : ''}</h4>
-                <p className="text-[10px] text-slate-400 font-mono">
-                  {localRoleLabel} • {localLabelTitle} • {isVideoOff ? 'Camera Turned Off' : 'Camera Stream Ready'}
+                <h4 className="text-xs font-bold text-slate-200">{localRoleNameLabel} {normalizedViewerRole === 'candidate' ? '(You)' : ''}</h4>
+                <p className="text-[10px] text-slate-400 font-mono break-all">
+                  {localRoleLabel} • {isVideoOff ? 'Camera Turned Off' : 'Camera Stream Ready'}
                 </p>
+                {localLabelEmail && (
+                  <p className="text-[9px] text-slate-300 font-mono break-all">{localLabelEmail}</p>
+                )}
               </div>
             </div>
           )}
@@ -337,9 +682,13 @@ export const WebRTCVideoCall = ({
               ) : (
                 <Mic className="w-3 h-3 text-emerald-400" />
               )}
-              <span className="font-semibold">{localLabelName}</span>
+              <span className="font-semibold">{localRoleNameLabel}</span>
             </div>
-            <div className="text-[9px] text-slate-300 mt-0.5">{localRoleLabel} • {localLabelTitle}</div>
+            {localLabelEmail ? (
+              <div className="text-[9px] text-slate-300 mt-0.5 break-all">{localLabelEmail}</div>
+            ) : (
+              <div className="text-[9px] text-slate-300 mt-0.5">{localRoleLabel} • {localLabelTitle}</div>
+            )}
           </div>
         </div>
       </div>

@@ -90,6 +90,7 @@ const io = new Server(server, {
   pingTimeout: 60000,
   pingInterval: 25000,
 });
+app.set('io', io);
 
 // 6. Request Body Parsing
 app.use(express.json({ limit: '2mb' }));

@@ -16,7 +16,19 @@ const interviewSchema = new mongoose.Schema(
     candidateId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
+      default: null,
+    },
+    candidateEmail: {
+      type: String,
+      default: '',
+      lowercase: true,
+      trim: true,
+    },
+    interviewerEmail: {
+      type: String,
+      default: '',
+      lowercase: true,
+      trim: true,
     },
     problemId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -31,6 +43,22 @@ const interviewSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
+    },
+    candidateName: {
+      type: String,
+      default: 'Candidate',
+    },
+    interviewerName: {
+      type: String,
+      default: 'Interviewer',
+    },
+    candidateTitle: {
+      type: String,
+      default: 'Candidate',
+    },
+    interviewerTitle: {
+      type: String,
+      default: 'Senior Interviewer',
     },
     status: {
       type: String,
@@ -48,19 +76,16 @@ const interviewSchema = new mongoose.Schema(
     startedAt: { type: Date },
     endedAt: { type: Date },
     interviewerNotes: { type: String, default: '' },
-    transcript: [
-      {
-        speaker: { type: String, enum: ['Interviewer', 'AI', 'Candidate'] },
-        message: { type: String },
-        timestamp: { type: Date, default: Date.now },
-      },
-    ],
+    chatMessages: [{ type: mongoose.Schema.Types.Mixed, default: [] }],
+    transcript: [{ type: mongoose.Schema.Types.Mixed, default: [] }],
   },
   { timestamps: true }
 );
 
 interviewSchema.index({ candidateId: 1, status: 1 });
 interviewSchema.index({ interviewerId: 1, status: 1 });
+interviewSchema.index({ candidateEmail: 1, status: 1 });
+interviewSchema.index({ interviewerEmail: 1, status: 1 });
 interviewSchema.index({ scheduledAt: -1 });
 
 export const Interview = mongoose.model('Interview', interviewSchema);

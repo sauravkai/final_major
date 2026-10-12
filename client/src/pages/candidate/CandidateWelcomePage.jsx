@@ -19,7 +19,7 @@ import {
 import { motion } from 'framer-motion';
 import StatsCharts from '../../components/common/StatsCharts';
 import { getCanonicalSolvedCount } from '../../utils/dashboardStats';
-import { isSessionJoinAllowed, isSessionVisibleInUpcomingList } from '../../utils/sessionAccess';
+import { isSessionJoinAllowed, isSessionVisibleInUpcomingList, removeCancelledInterviewFromState } from '../../utils/sessionAccess';
 
 export const CandidateWelcomePage = () => {
   const { user, token } = useAuth();
@@ -46,9 +46,12 @@ export const CandidateWelcomePage = () => {
           API.get('/interviews/reports').catch(() => ({ data: { success: true, data: [] } })),
         ]);
 
-        const interviewList = Array.isArray(ivRes.data?.data) ? ivRes.data.data : [];
-        const reportList = Array.isArray(reportsRes.data?.data) ? reportsRes.data.data : [];
-        const allInterviews = [...interviewList, ...reportList].reduce((acc, item) => {
+        const interviewList = Array.isArray(ivRes.data?.data) ? ivRes.data.data.filter(isSessionVisibleInUpcomingList) : [];
+        const reportList = Array.isArray(reportsRes.data?.data) ? reportsRes.data.data.filter(isSessionVisibleInUpcomingList) : [];
+        const sessionList = Array.isArray(sRes.data?.sessions)
+          ? sRes.data.sessions.filter((item) => item && item.type && !['login', 'logout'].includes(String(item.type).toLowerCase()))
+          : [];
+        const allInterviews = [...interviewList, ...reportList, ...sessionList].reduce((acc, item) => {
           if (!item || (!item._id && !item.roomId && !item.sessionId && !item.id && !item.reportId)) return acc;
           const key = String(item._id || item.roomId || item.sessionId || item.id || item.reportId || '');
           if (key && acc.some((existing) => String(existing._id || existing.roomId || existing.sessionId || existing.id || existing.reportId || '') === key)) {
@@ -59,12 +62,14 @@ export const CandidateWelcomePage = () => {
         }, []);
 
         setInterviews(allInterviews);
-        setSessions(sRes.data?.sessions || []);
+        setSessions(sessionList.filter(isSessionVisibleInUpcomingList));
       } catch (e) {
         // ignore network errors in demo
       }
     };
     fetchData();
+    const intervalId = setInterval(fetchData, 30000);
+    return () => clearInterval(intervalId);
   }, [token, user]);
 
   const features = [
@@ -226,16 +231,42 @@ export const CandidateWelcomePage = () => {
                       <p className="text-xs text-slate-600">{new Date(it.scheduledAt).toLocaleString()}</p>
                     </div>
 
-                    {isSessionJoinAllowed({ status: it.status, scheduledAt: it.scheduledAt }) ? (
-                      <Link
-                        to={`/live-room/${it.roomId}`}
-                        className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-600/20 transition-all"
-                      >
-                        Join Live Room
-                      </Link>
+                    {isSessionJoinAllowed(it) ? (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const interviewId = it.roomId || it.id || it._id || it.sessionId;
+                            if (!interviewId || !window.confirm(`Cancel this interview for ${it.title || 'your upcoming session'}?`)) {
+                              return;
+                            }
+
+                            try {
+                              const API = (await import('../../services/api')).default;
+                              const res = await API.put(`/interviews/${interviewId}/cancel`);
+                              if (res.data.success) {
+                                const nextState = removeCancelledInterviewFromState(interviews, sessions, interviewId);
+                                setInterviews(nextState.interviews);
+                                setSessions(nextState.sessions);
+                              }
+                            } catch (error) {
+                              console.error('Failed to cancel interview', error);
+                            }
+                          }}
+                          className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 text-xs font-semibold transition-all"
+                        >
+                          Cancel
+                        </button>
+                        <Link
+                          to={`/live-room/${it.roomId}`}
+                          className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-600/20 transition-all"
+                        >
+                          Join Live Room
+                        </Link>
+                      </div>
                     ) : (
                       <span className="text-xs text-slate-400">
-                        {new Date(it.scheduledAt).getTime() > Date.now() ? 'Starts Soon' : 'Ended'}
+                        {['cancelled', 'canceled'].includes(String(it.status || '').toLowerCase()) ? 'Cancelled' : 'Ended'}
                       </span>
                     )}
                   </div>

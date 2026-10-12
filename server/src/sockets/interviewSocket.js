@@ -4,6 +4,22 @@ import { Interview } from '../models/Interview.js';
  * Socket.IO Handler for Real-Time Collaborative Coding, WebRTC Signaling, and Interview Room State
  */
 export const setupInterviewSocket = (io) => {
+  const markInterviewEnded = async (roomId) => {
+    if (!roomId) return null;
+
+    return Interview.findOneAndUpdate(
+      { roomId },
+      {
+        $set: {
+          status: 'ended',
+          endedAt: new Date(),
+          updatedAt: new Date(),
+        },
+      },
+      { new: true },
+    ).catch(() => null);
+  };
+
   const canJoinInterviewRoom = async (roomId) => {
     if (!roomId) return false;
 
@@ -12,11 +28,6 @@ export const setupInterviewSocket = (io) => {
 
     const normalized = String(interview.status || '').trim().toLowerCase();
     if (['completed', 'finished', 'cancelled', 'ended', 'closed'].includes(normalized)) {
-      return false;
-    }
-
-    const scheduledAt = interview.scheduledAt ? new Date(interview.scheduledAt).getTime() : null;
-    if (scheduledAt && !Number.isNaN(scheduledAt) && scheduledAt > Date.now()) {
       return false;
     }
 
@@ -51,6 +62,8 @@ export const setupInterviewSocket = (io) => {
           language: 'javascript',
           participants: new Map(),
           timerSeconds: 45 * 60,
+          chatMessages: [],
+          notes: '',
         });
       }
 
@@ -62,12 +75,14 @@ export const setupInterviewSocket = (io) => {
       };
       room.participants.set(socket.id, participantInfo);
 
-      // Send existing room code state to newly joined user
+      // Send existing room code, chat, and notes state to newly joined user
       socket.emit('room-state-init', {
         code: room.code,
         language: room.language,
         participants: Array.from(room.participants.values()),
         timerSeconds: room.timerSeconds,
+        chatMessages: room.chatMessages || [],
+        notes: room.notes || '',
       });
 
       // Broadcast new participant arrival to room
@@ -108,6 +123,7 @@ export const setupInterviewSocket = (io) => {
 
     // Live Room Chat Messages
     socket.on('send-chat-message', ({ roomId, message, user, messageId }) => {
+      const room = roomState.get(roomId);
       const chatPayload = {
         id: messageId || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         text: message,
@@ -115,12 +131,26 @@ export const setupInterviewSocket = (io) => {
         role: user?.role || 'candidate',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
+      if (room) {
+        if (!room.chatMessages) room.chatMessages = [];
+        room.chatMessages.push(chatPayload);
+      }
       io.to(roomId).emit('new-chat-message', chatPayload);
+    });
+
+    // Live Room Notes Sync
+    socket.on('notes-change', ({ roomId, notes }) => {
+      const room = roomState.get(roomId);
+      if (room) {
+        room.notes = notes;
+      }
+      socket.to(roomId).emit('notes-update', { notes });
     });
 
     // WebRTC Signaling: Offer
     socket.on('webrtc-offer', ({ roomId, offer, targetSocketId }) => {
-      socket.to(roomId).emit('webrtc-offer-received', {
+      const destination = targetSocketId || roomId;
+      socket.to(destination).emit('webrtc-offer-received', {
         offer,
         senderSocketId: socket.id,
       });
@@ -128,22 +158,69 @@ export const setupInterviewSocket = (io) => {
 
     // WebRTC Signaling: Answer
     socket.on('webrtc-answer', ({ roomId, answer, targetSocketId }) => {
-      socket.to(roomId).emit('webrtc-answer-received', {
+      const destination = targetSocketId || roomId;
+      socket.to(destination).emit('webrtc-answer-received', {
         answer,
         senderSocketId: socket.id,
       });
     });
 
     // WebRTC Signaling: ICE Candidate
-    socket.on('webrtc-ice-candidate', ({ roomId, candidate }) => {
-      socket.to(roomId).emit('webrtc-ice-candidate-received', {
+    socket.on('webrtc-ice-candidate', ({ roomId, candidate, targetSocketId }) => {
+      const destination = targetSocketId || roomId;
+      socket.to(destination).emit('webrtc-ice-candidate-received', {
         candidate,
         senderSocketId: socket.id,
       });
     });
 
+    socket.on('end-call', async ({ roomId, user }) => {
+      if (!roomId) return;
+
+      const room = roomState.get(roomId);
+      const savedNotes = room?.notes || '';
+      const savedChat = room?.chatMessages || [];
+
+      try {
+        await Interview.findOneAndUpdate(
+          { roomId },
+          {
+            $set: {
+              status: 'completed',
+              endedAt: new Date(),
+              updatedAt: new Date(),
+              interviewerNotes: savedNotes,
+              chatMessages: savedChat,
+              transcript: savedChat,
+            },
+          },
+          { new: true }
+        );
+      } catch (err) {
+        console.warn('[end-call] Failed to persist notes/chat to Interview:', err.message);
+      }
+
+      await markInterviewEnded(roomId);
+
+      const endMessage = `${user?.name || 'A participant'} ended the interview. The session is now closed for everyone.`;
+
+      io.in(roomId).emit('session-ended', {
+        roomId,
+        message: endMessage,
+        chatMessages: savedChat,
+        notes: savedNotes,
+      });
+
+      try { io.in(roomId).socketsLeave(roomId); } catch (_) {}
+
+      if (room) {
+        room.participants.clear();
+        roomState.delete(roomId);
+      }
+    });
+
     // Disconnect Handler
-    socket.on('disconnecting', () => {
+    socket.on('disconnecting', async () => {
       for (const roomId of socket.rooms) {
         if (roomId !== socket.id && roomState.has(roomId)) {
           const room = roomState.get(roomId);
@@ -156,7 +233,16 @@ export const setupInterviewSocket = (io) => {
             participants: Array.from(room.participants.values()),
           });
 
+          if (room.participants.size > 0) {
+            await markInterviewEnded(roomId);
+            socket.to(roomId).emit('session-ended', {
+              roomId,
+              message: `${leavingUser?.user?.name || 'A participant'} ended the interview. The session is now closed for both of you.`,
+            });
+          }
+
           if (room.participants.size === 0) {
+            await markInterviewEnded(roomId);
             roomState.delete(roomId);
           }
         }

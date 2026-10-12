@@ -1,6 +1,7 @@
 import React, { useMemo, useEffect, useState } from 'react';
 import API from '../../services/api';
 import { dedupeSolvedHistory, getCanonicalSolvedCount } from '../../utils/dashboardStats';
+import { getUserScopedHistoryKey, isPlaceholderSession } from '../../utils/sessionAccess';
 import {
   ResponsiveContainer,
   LineChart,
@@ -153,15 +154,20 @@ export default function StatsCharts({ user = {}, interviews: propInterviews = []
 
   const savedInterviewReports = useMemo(() => {
     try {
-      const raw = JSON.parse(localStorage.getItem('previousInterviewReports') || '[]');
-      return Array.isArray(raw) ? raw : [];
+      const key = getUserScopedHistoryKey('previousInterviewReports', user);
+      const raw = JSON.parse(localStorage.getItem(key) || '[]');
+      const sanitized = Array.isArray(raw) ? raw.filter((entry) => entry && !isPlaceholderSession(entry)) : [];
+      if (sanitized.length !== (Array.isArray(raw) ? raw.length : 0)) {
+        localStorage.setItem(key, JSON.stringify(sanitized));
+      }
+      return sanitized;
     } catch {
       return [];
     }
-  }, []);
+  }, [user]);
 
   const completedInterviewRecords = useMemo(() => {
-    const merged = [...(Array.isArray(interviews) ? interviews : []), ...savedInterviewReports];
+    const merged = [...(Array.isArray(interviews) ? interviews : []), ...savedInterviewReports].filter((entry) => entry && !isPlaceholderSession(entry));
     return merged.filter((entry) => {
       if (!entry) return false;
       const status = String(entry?.status || entry?.state || '').trim().toLowerCase();
@@ -202,7 +208,7 @@ export default function StatsCharts({ user = {}, interviews: propInterviews = []
     ? statusPie
     : (() => {
         const counts = { scheduled: 0, 'in-progress': 0, completed: 0, cancelled: 0 };
-        const allInterviewItems = [...(Array.isArray(interviews) ? interviews : []), ...savedInterviewReports];
+        const allInterviewItems = [...(Array.isArray(interviews) ? interviews : []), ...savedInterviewReports].filter((it) => it && !isPlaceholderSession(it));
 
         allInterviewItems.forEach((it) => {
           if (!it) return;
@@ -212,7 +218,11 @@ export default function StatsCharts({ user = {}, interviews: propInterviews = []
           if (counts[key] !== undefined) counts[key] += 1;
         });
 
-        return Object.entries(counts).map(([k, v], i) => ({ name: k, value: v, color: COLORS[i % COLORS.length] }));
+        const nextSeries = Object.entries(counts)
+          .filter(([, value]) => value > 0)
+          .map(([k, v], i) => ({ name: k, value: v, color: COLORS[i % COLORS.length] }));
+
+        return nextSeries;
       })();
 
   return (

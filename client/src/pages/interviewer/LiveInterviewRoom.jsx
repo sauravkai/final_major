@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { MonacoCodeEditor } from '../../components/editor/MonacoCodeEditor';
 import { TestRunnerUI } from '../../components/editor/TestRunnerUI';
 import { WebRTCVideoCall } from '../../components/video/WebRTCVideoCall';
@@ -10,7 +10,7 @@ import { useSocket } from '../../context/SocketContext';
 import { useAuth } from '../../context/AuthContext';
 import { Video, Code2, MessageSquare, NotebookPen, PhoneOff, CheckCircle2, AlertCircle } from 'lucide-react';
 import API from '../../services/api';
-import { isSessionJoinAllowed } from '../../utils/sessionAccess';
+import { getUserScopedHistoryKey, isSessionJoinAllowed } from '../../utils/sessionAccess';
 
 // Question data - expanded to match problem bank
 const commentCodeBlock = (source = '') => {
@@ -1452,6 +1452,7 @@ export const LiveInterviewRoom = () => {
   const { socket } = useSocket();
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     if (!user) {
@@ -1476,9 +1477,7 @@ export const LiveInterviewRoom = () => {
   const [language, setLanguage] = useState('javascript');
   const [questionMetrics, setQuestionMetrics] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
-  const [interviewerNotes, setInterviewerNotes] = useState(
-    'Interviewer Evaluation Scratchpad:\n- Candidate explained time complexity clearly.\n- Handled edge cases and validated assumptions.\n- Strong reasoning and communication.'
-  );
+  const [interviewerNotes, setInterviewerNotes] = useState('');
   const questionStartedAtRef = useRef(Date.now());
   const finalizationInFlightRef = useRef(false);
 
@@ -1492,9 +1491,11 @@ export const LiveInterviewRoom = () => {
   // Participant details for live video overlay
   const [candidateName, setCandidateName] = useState('Candidate');
   const [candidateTitle, setCandidateTitle] = useState('Candidate');
+  const [candidateEmail, setCandidateEmail] = useState('');
   const [interviewTitle, setInterviewTitle] = useState('Technical Evaluation Round');
   const [interviewerName, setInterviewerName] = useState('Interviewer');
   const [interviewerTitle, setInterviewerTitle] = useState('Senior Interviewer');
+  const [interviewerEmail, setInterviewerEmail] = useState('');
 
   // Loading and connection error state
   const [isLoading, setIsLoading] = useState(true);
@@ -1513,25 +1514,45 @@ export const LiveInterviewRoom = () => {
           const candidateInfo = interview.candidateId || {};
           const interviewerInfo = interview.interviewerId || {};
 
-          if (!isSessionJoinAllowed(interview)) {
-            const startTime = interview?.scheduledAt ? new Date(interview.scheduledAt) : null;
-            const hasNotStarted = startTime && startTime.getTime() > Date.now();
+          const normalizedStatus = String(interview.status || '').trim().toLowerCase();
+          const isTerminated = ['completed', 'finished', 'cancelled', 'canceled', 'ended', 'closed'].includes(normalizedStatus) || Boolean(interview.endedAt) || Boolean(interview.cancelledAt);
 
-            setConnectionError(
-              hasNotStarted
-                ? `This interview has not started yet. It is scheduled for ${startTime.toLocaleString()}.`
-                : 'This session has already ended and cannot be rejoined.'
-            );
+          if (isTerminated) {
+            setConnectionError('This session has already ended and cannot be rejoined.');
             setIsLoading(false);
             navigate('/dashboard', { replace: true });
             return;
           }
 
-          setCandidateName(interview.candidateName || candidateInfo.name || 'Candidate');
-          setCandidateTitle(candidateInfo.title || interview.role || 'Candidate');
+          // Prefer any info passed via the invite URL query params when API record is missing
+          const qp = new URLSearchParams(location.search);
+          const qCandidateName = qp.get('candidateName') || qp.get('candidate');
+          const qCandidateEmail = qp.get('candidateEmail') || qp.get('candidateEmail');
+          const qInterviewerName = qp.get('interviewerName') || qp.get('interviewer');
+          const qInterviewerEmail = qp.get('interviewerEmail') || qp.get('interviewerEmail');
+
+          const resolvedCandidateName = interview.candidateName || qCandidateName || candidateInfo?.name || interview.candidateId?.name || 'Candidate';
+          const resolvedInterviewerName = interview.interviewerName || qInterviewerName || interviewerInfo?.name || interview.interviewerId?.name || 'Interviewer';
+          const resolvedCandidateTitle = interview.candidateTitle || candidateInfo?.title || interview.role || 'Candidate';
+          const resolvedCandidateEmail = interview.candidateEmail || qCandidateEmail || candidateInfo?.email || interview.candidateId?.email || '';
+          const resolvedInterviewerEmail = interview.interviewerEmail || qInterviewerEmail || interviewerInfo?.email || interview.interviewerId?.email || user?.email || '';
+          const resolvedInterviewerTitle = interview.interviewerTitle || interviewerInfo?.title || user?.title || 'Senior Interviewer';
+
+          setCandidateName(resolvedCandidateName);
+          setCandidateTitle(resolvedCandidateTitle);
+          setCandidateEmail(resolvedCandidateEmail);
           setInterviewTitle(interview.title || interview.problemTitle || 'Technical Evaluation Round');
-          setInterviewerName(interviewerInfo.name || user?.name || 'Interviewer');
-          setInterviewerTitle(interviewerInfo.title || user?.title || 'Senior Interviewer');
+          setInterviewerName(resolvedInterviewerName);
+          setInterviewerTitle(resolvedInterviewerTitle);
+          setInterviewerEmail(resolvedInterviewerEmail);
+
+          // If the current viewer is the candidate, prefer the authenticated
+          // user's name/email to avoid showing incorrect data from the
+          // interview record (e.g., when candidate info is missing or stale).
+          if (String(user?.role || '').trim().toLowerCase() === 'candidate') {
+            setCandidateName(user?.name || resolvedCandidateName);
+            setCandidateEmail(user?.email || resolvedCandidateEmail);
+          }
 
           console.log('Interview object:', interview);
           console.log('Interview problems:', interview.problems);
@@ -1570,6 +1591,17 @@ export const LiveInterviewRoom = () => {
           console.warn('API response structure invalid:', res.data);
         }
       } catch (error) {
+        const isRoomMissing = error?.response?.status === 404;
+        if (isRoomMissing) {
+          console.warn(`No interview data found for room ${roomId}. Using live-room defaults.`);
+          setCandidateName('Candidate');
+          setCandidateTitle('Candidate');
+          setInterviewTitle('Technical Evaluation Round');
+          setInterviewerName('Interviewer');
+          setInterviewerTitle('Senior Interviewer');
+          setIsLoading(false);
+          return;
+        }
         console.error('Failed to load interview data:', error);
       }
     };
@@ -1580,8 +1612,8 @@ export const LiveInterviewRoom = () => {
   // Socket.IO Collaborative Editor & Room Synchronization
   useEffect(() => {
     if (!socket) {
-      setConnectionError('Socket connection not available. Please refresh the page.');
-      setIsLoading(false);
+      setConnectionError(null);
+      setIsLoading(true);
       return;
     }
 
@@ -1616,12 +1648,18 @@ export const LiveInterviewRoom = () => {
       setIsLoading(false);
     };
 
-    const handleRoomStateInit = ({ code: initialCode, language: initialLanguage }) => {
+    const handleRoomStateInit = ({ code: initialCode, language: initialLanguage, chatMessages: initialChat, notes: initialNotes }) => {
       if (typeof initialCode === 'string' && initialCode.trim()) {
         setCode(initialCode);
       }
       if (initialLanguage) {
         setLanguage(initialLanguage);
+      }
+      if (Array.isArray(initialChat) && initialChat.length) {
+        setChatMessages(initialChat);
+      }
+      if (typeof initialNotes === 'string' && initialNotes.trim()) {
+        setInterviewerNotes(initialNotes);
       }
       setIsLoading(false);
     };
@@ -1635,12 +1673,60 @@ export const LiveInterviewRoom = () => {
       if (newLang) setLanguage(newLang);
     };
 
+    const handleNewChatMessage = (msg) => {
+      if (!msg?.text) return;
+      const normalized = {
+        id: msg.id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        text: msg.text,
+        sender: msg.sender || 'Anonymous',
+        role: msg.role || 'candidate',
+        timestamp: msg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setChatMessages((prev) => {
+        if (prev.some((m) => m.id === normalized.id)) return prev;
+        return [...prev, normalized];
+      });
+    };
+
+    const handleNotesUpdate = ({ notes: newNotes }) => {
+      if (typeof newNotes === 'string') {
+        setInterviewerNotes(newNotes);
+      }
+    };
+
+    const handleSessionEnded = async ({ roomId: endedRoomId, message, chatMessages: endedChat, notes: endedNotes }) => {
+      if (!endedRoomId || endedRoomId !== roomId) return;
+      setConnectionError(message || 'This interview has ended for both participants.');
+
+      if (Array.isArray(endedChat) && endedChat.length) {
+        setChatMessages(endedChat);
+      }
+      if (typeof endedNotes === 'string' && endedNotes) {
+        setInterviewerNotes(endedNotes);
+      }
+
+      let finalReport = null;
+      if (!finalizationInFlightRef.current) {
+        finalReport = await finalizeInterviewSession({
+          triggeredByRemote: true,
+          overrideChat: endedChat,
+          overrideNotes: endedNotes,
+        });
+      }
+
+      const reportId = finalReport?._id || finalReport?.reportId || roomId;
+      navigate(`/results/${reportId}`, { state: { reportData: finalReport || {} }, replace: true });
+    };
+
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('connect_error', handleConnectError);
     socket.on('room-state-init', handleRoomStateInit);
     socket.on('code-update', handleCodeUpdate);
     socket.on('language-update', handleLanguageUpdate);
+    socket.on('new-chat-message', handleNewChatMessage);
+    socket.on('notes-update', handleNotesUpdate);
+    socket.on('session-ended', handleSessionEnded);
 
     if (socket.connected) {
       setIsSocketConnected(true);
@@ -1662,8 +1748,11 @@ export const LiveInterviewRoom = () => {
       socket.off('room-state-init', handleRoomStateInit);
       socket.off('code-update', handleCodeUpdate);
       socket.off('language-update', handleLanguageUpdate);
+      socket.off('new-chat-message', handleNewChatMessage);
+      socket.off('notes-update', handleNotesUpdate);
+      socket.off('session-ended', handleSessionEnded);
     };
-  }, [socket, roomId, user]);
+  }, [socket, roomId, user, navigate]);
 
   const handleCodeChange = (newCode) => {
     setCode(newCode);
@@ -1676,6 +1765,14 @@ export const LiveInterviewRoom = () => {
     setLanguage(newLang);
     if (socket) {
       socket.emit('language-change', { roomId, language: newLang });
+    }
+  };
+
+  const handleNotesChange = (newNotes) => {
+    const val = typeof newNotes === 'string' ? newNotes : (newNotes?.target?.value ?? '');
+    setInterviewerNotes(val);
+    if (socket) {
+      socket.emit('notes-change', { roomId, notes: val });
     }
   };
 
@@ -1817,19 +1914,24 @@ export const LiveInterviewRoom = () => {
     };
 
     try {
-      const stored = JSON.parse(localStorage.getItem('previousInterviewReports') || '[]');
+      const key = getUserScopedHistoryKey('previousInterviewReports', user);
+      const stored = JSON.parse(localStorage.getItem(key) || '[]');
       const list = Array.isArray(stored) ? stored : [];
       const merged = [safeReport, ...list.filter((item) => String(item._id) !== String(safeReport._id))].slice(0, 20);
-      localStorage.setItem('previousInterviewReports', JSON.stringify(merged));
+      localStorage.setItem(key, JSON.stringify(merged));
       window.dispatchEvent(new CustomEvent('interviewReportUpdated'));
     } catch {
       // ignore persistence errors
     }
   };
 
-  const handleEndInterview = async () => {
+  const finalizeInterviewSession = async ({ triggeredByRemote = false, overrideChat, overrideNotes } = {}) => {
     if (finalizationInFlightRef.current) return;
     finalizationInFlightRef.current = true;
+
+    if (socket && !triggeredByRemote) {
+      socket.emit('end-call', { roomId, user: user || { name: 'Candidate', role: 'candidate' } });
+    }
 
     try {
       const question = availableQuestions[currentQuestionIndex];
@@ -1861,6 +1963,9 @@ export const LiveInterviewRoom = () => {
         return [...questionMetrics, currentEntry];
       })();
 
+      const effectiveChat = (Array.isArray(overrideChat) && overrideChat.length) ? overrideChat : chatMessages;
+      const effectiveNotes = (typeof overrideNotes === 'string' && overrideNotes.trim()) ? overrideNotes : interviewerNotes;
+
       const payload = {
         interviewTitle,
         sessionScores: finalizedQuestionMetrics.map((entry) => Number(entry.score ?? 0)).concat(
@@ -1868,7 +1973,7 @@ export const LiveInterviewRoom = () => {
             ? [((Number(testResult.passCount) / Math.max(Number(testResult.totalCount || 1), 1)) * 100)]
             : []
         ),
-        transcriptHistory: chatMessages
+        transcriptHistory: effectiveChat
           .filter((msg) => msg?.text && msg?.sender !== 'System')
           .map((msg) => ({
             speaker: msg.sender === user?.name ? 'Candidate' : (msg.role === 'interviewer' ? 'Interviewer' : 'Candidate'),
@@ -1882,8 +1987,8 @@ export const LiveInterviewRoom = () => {
           timeSpentSeconds: Number(entry.timeSpentSeconds ?? 0),
           answer: entry.answer || '',
         })),
-        chatMessages,
-        interviewerNotes,
+        chatMessages: effectiveChat,
+        interviewerNotes: effectiveNotes,
         totalSessionTime: finalizedQuestionMetrics.reduce((sum, entry) => sum + Number(entry.timeSpentSeconds ?? 0), 0),
       };
 
@@ -1898,24 +2003,26 @@ export const LiveInterviewRoom = () => {
         const finalReportData = { ...res.data.result, reportId: finalReportId };
         localStorage.setItem('aiInterviewReport:last', JSON.stringify(finalReportData));
         persistPreviousReport(finalReportData);
-        navigate(`/results/${finalReportId}`, { state: { reportData: finalReportData } });
-      } else {
-        const fallbackId = `report_${Date.now()}`;
-        const fallbackData = { ...payload, reportId: fallbackId };
-        localStorage.setItem('aiInterviewReport:last', JSON.stringify(fallbackData));
-        persistPreviousReport(fallbackData);
-        navigate('/results/report', { state: { reportData: fallbackData } });
+        return finalReportData;
       }
+
+      const fallbackId = `report_${Date.now()}`;
+      const fallbackData = { ...payload, reportId: fallbackId };
+      localStorage.setItem('aiInterviewReport:last', JSON.stringify(fallbackData));
+      persistPreviousReport(fallbackData);
+      return fallbackData;
     } catch (e) {
       console.error('Interview finalization failed:', e);
       const fallbackId = `report_${Date.now()}`;
+      const effectiveChat = (Array.isArray(overrideChat) && overrideChat.length) ? overrideChat : chatMessages;
+      const effectiveNotes = (typeof overrideNotes === 'string' && overrideNotes.trim()) ? overrideNotes : interviewerNotes;
       const fallbackData = {
         ...((window && window.localStorage) ? JSON.parse(window.localStorage.getItem('aiInterviewReport:last') || '{}') : {}),
         reportId: fallbackId,
-        chatMessages,
-        interviewerNotes,
+        chatMessages: effectiveChat,
+        interviewerNotes: effectiveNotes,
         questionMetrics: questionMetrics.length ? questionMetrics : [],
-        transcriptHistory: chatMessages.filter((msg) => msg?.text && msg?.sender !== 'System')
+        transcriptHistory: effectiveChat.filter((msg) => msg?.text && msg?.sender !== 'System')
           .map((msg) => ({
             speaker: msg.sender === user?.name ? 'Candidate' : (msg.role === 'interviewer' ? 'Interviewer' : 'Candidate'),
             text: msg.text,
@@ -1924,8 +2031,16 @@ export const LiveInterviewRoom = () => {
       };
       localStorage.setItem('aiInterviewReport:last', JSON.stringify(fallbackData));
       persistPreviousReport(fallbackData);
-      navigate('/results/report', { state: { reportData: fallbackData } });
+      return fallbackData;
+    } finally {
+      finalizationInFlightRef.current = false;
     }
+  };
+
+  const handleEndInterview = async () => {
+    const finalReport = await finalizeInterviewSession({ triggeredByRemote: false });
+    const reportId = finalReport?._id || finalReport?.reportId || roomId;
+    navigate(`/results/${reportId}`, { state: { reportData: finalReport || {} }, replace: true });
   };
 
   // Extract className logic to avoid parsing issues
@@ -2060,30 +2175,30 @@ export const LiveInterviewRoom = () => {
             <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-700/50">
               <div>
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-xs font-mono text-slate-400">{availableQuestions[currentQuestionIndex].id}.</span>
+                  <span className="text-xs font-mono text-slate-300">{availableQuestions[currentQuestionIndex].id}.</span>
                   <h3 className="text-base font-bold text-white">{availableQuestions[currentQuestionIndex].title}</h3>
                 </div>
                 <span className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold border ${
                   availableQuestions[currentQuestionIndex].difficulty === 'Easy' 
-                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-                    : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
+                    : 'bg-amber-500/20 text-amber-300 border-amber-400/40'
                 }`}>
                   {availableQuestions[currentQuestionIndex].difficulty}
                 </span>
               </div>
-              <div className="flex items-center gap-2 text-slate-400">
+              <div className="flex items-center gap-2 text-slate-300">
                 <span className="text-[10px]">Acceptance</span>
-                <span className="text-[10px] font-mono text-emerald-400">{availableQuestions[currentQuestionIndex].acceptance}</span>
+                <span className="text-[10px] font-mono text-emerald-300">{availableQuestions[currentQuestionIndex].acceptance}</span>
               </div>
             </div>
 
             {/* Problem Description */}
             <div className="space-y-3">
-              <p className="text-slate-200 leading-relaxed text-[13px]">
+              <p className="text-slate-100 leading-relaxed text-[13px]">
                 {availableQuestions[currentQuestionIndex].description}
               </p>
               {availableQuestions[currentQuestionIndex].additionalDescription && (
-                <p className="text-slate-200 leading-relaxed text-[13px]">
+                <p className="text-slate-100 leading-relaxed text-[13px]">
                   {availableQuestions[currentQuestionIndex].additionalDescription}
                 </p>
               )}
@@ -2097,12 +2212,12 @@ export const LiveInterviewRoom = () => {
                     <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
                     Example {index + 1}:
                   </h4>
-                  <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700/50">
+                  <div className="bg-slate-800/80 p-4 rounded-lg border border-slate-600/60">
                     <div className="font-mono text-[11px] space-y-2">
-                      <div><span className="text-slate-400">Input:</span> <span className="text-white">{example.input}</span></div>
-                      <div><span className="text-slate-400">Output:</span> <span className="text-emerald-400">{example.output}</span></div>
+                      <div><span className="text-slate-300">Input:</span> <span className="text-white">{example.input}</span></div>
+                      <div><span className="text-slate-300">Output:</span> <span className="text-emerald-300">{example.output}</span></div>
                       {example.explanation && (
-                        <div><span className="text-slate-400">Explanation:</span> <span className="text-slate-300">{example.explanation}</span></div>
+                        <div><span className="text-slate-300">Explanation:</span> <span className="text-slate-200">{example.explanation}</span></div>
                       )}
                     </div>
                   </div>
@@ -2116,10 +2231,10 @@ export const LiveInterviewRoom = () => {
                 <span className="w-2 h-2 rounded-full bg-amber-500"></span>
                 Constraints:
               </h4>
-              <ul className="space-y-2 text-[11px] text-slate-300 font-mono">
+              <ul className="space-y-2 text-[11px] text-slate-200 font-mono">
                 {availableQuestions[currentQuestionIndex].constraints.map((constraint, index) => (
                   <li key={index} className="flex items-start gap-2">
-                    <span className="text-slate-500 mt-0.5">•</span>
+                    <span className="text-slate-400 mt-0.5">•</span>
                     <span>{constraint}</span>
                   </li>
                 ))}
@@ -2133,7 +2248,7 @@ export const LiveInterviewRoom = () => {
                   <span className="w-2 h-2 rounded-full bg-purple-500"></span>
                   Follow-up:
                 </h4>
-                <p className="text-slate-300 text-[11px] leading-relaxed">
+                <p className="text-slate-200 text-[11px] leading-relaxed">
                   {availableQuestions[currentQuestionIndex].followUp}
                 </p>
               </div>
@@ -2239,31 +2354,34 @@ export const LiveInterviewRoom = () => {
             </button>
           </div>
 
-          <div className="flex-1 min-h-[320px] overflow-hidden">
-            {activeSidePanel === 'video' && (
+          <div className="flex-1 min-h-[320px] overflow-hidden relative">
+            <div className={`h-full ${activeSidePanel === 'video' ? 'block' : 'hidden'}`}>
               <WebRTCVideoCall
                 candidateName={candidateName}
                 candidateTitle={candidateTitle}
+                candidateEmail={candidateEmail}
                 interviewerName={interviewerName}
                 interviewerTitle={interviewerTitle}
+                interviewerEmail={interviewerEmail}
                 viewerRole={String(user?.role || 'interviewer').trim().toLowerCase()}
                 roomId={roomId}
                 onEndInterview={handleEndInterview}
               />
-            )}
-            {activeSidePanel === 'chat' && (
+            </div>
+            <div className={`h-full ${activeSidePanel === 'chat' ? 'block' : 'hidden'}`}>
               <ChatPanel
                 roomId={roomId}
                 messages={chatMessages}
                 onMessagesChange={setChatMessages}
               />
-            )}
-            {activeSidePanel === 'notes' && (
+            </div>
+            <div className={`h-full ${activeSidePanel === 'notes' ? 'block' : 'hidden'}`}>
               <SharedNotes
                 value={interviewerNotes}
-                onChange={setInterviewerNotes}
+                onChange={handleNotesChange}
+                onSave={handleNotesChange}
               />
-            )}
+            </div>
           </div>
         </div>
       </div>

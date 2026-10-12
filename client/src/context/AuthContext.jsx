@@ -32,9 +32,27 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const clearUserScopedInterviewData = () => {
+    const keysToClear = [
+      'previousInterviewReports',
+      'cancelledInterviewHistory',
+      'solvedQuestionHistory',
+      'learningStreak',
+      'solvedProgress',
+      'solvedHistoryResetAt',
+      'lastSolvedMonth',
+      ...Object.keys(localStorage).filter(
+        (key) => key.startsWith('previousInterviewReports_') || key.startsWith('cancelledInterviewHistory_')
+      ),
+    ];
+
+    keysToClear.forEach((key) => localStorage.removeItem(key));
+  };
+
   const login = async (email, password) => {
     try {
       setLoading(true);
+      clearUserScopedInterviewData();
       const res = await API.post('/auth/login', { email, password });
       if (res.data.success) {
         setToken(res.data.token);
@@ -91,6 +109,7 @@ export const AuthProvider = ({ children }) => {
   const register = async (userData) => {
     try {
       setLoading(true);
+      clearUserScopedInterviewData();
       const res = await API.post('/auth/register', userData);
       if (res.data.success) {
         setToken(res.data.token);
@@ -109,6 +128,7 @@ export const AuthProvider = ({ children }) => {
   const registerWithGoogle = async () => {
     try {
       setLoading(true);
+      clearUserScopedInterviewData();
 
       const res = await API.post('/auth/google', { provider: 'google' });
       if (res.data.success) {
@@ -133,6 +153,7 @@ export const AuthProvider = ({ children }) => {
   const loginWithGoogle = async () => {
     try {
       setLoading(true);
+      clearUserScopedInterviewData();
 
       const res = await API.post('/auth/google', { provider: 'google' });
       if (res.data.success) {
@@ -230,6 +251,10 @@ export const AuthProvider = ({ children }) => {
     setToken('');
     localStorage.removeItem('user');
     localStorage.removeItem('token');
+
+    if (typeof window !== 'undefined') {
+      window.location.assign(`${window.location.origin}/`);
+    }
   };
 
   return (

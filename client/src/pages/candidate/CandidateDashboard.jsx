@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { useSocket } from '../../context/SocketContext';
 import {
   Trophy,
   Code2,
@@ -25,10 +26,11 @@ import {
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend, BarChart, Bar, PieChart as RechartsPieChart, Pie, Cell } from 'recharts';
 import API from '../../services/api';
 import { buildCategoryDistribution, dedupeSolvedHistory, getCanonicalSolvedCount, normalizeLearningStreak, replaceSolvedHistory } from '../../utils/dashboardStats';
-import { isSessionVisibleInUpcomingList } from '../../utils/sessionAccess';
+import { getUserScopedHistoryKey, isHistoryStatusVisible, isPlaceholderSession, isSessionVisibleInUpcomingList, removeCancelledInterviewFromState, resolveParticipantName, resolveParticipantEmail } from '../../utils/sessionAccess';
 
 export const CandidateDashboard = () => {
   const { user, setUser } = useAuth();
+  const { socket } = useSocket();
   const navigate = useNavigate();
   const [problems, setProblems] = useState([]);
   const [interviews, setInterviews] = useState([]);
@@ -128,23 +130,35 @@ export const CandidateDashboard = () => {
       const serverReports = res.data?.success && Array.isArray(res.data.data) ? res.data.data : [];
       const localSavedReports = (() => {
         try {
-          const raw = JSON.parse(localStorage.getItem('previousInterviewReports') || '[]');
+          const key = getUserScopedHistoryKey('previousInterviewReports', user);
+          const raw = JSON.parse(localStorage.getItem(key) || '[]');
+          return Array.isArray(raw) ? raw : [];
+        } catch {
+          return [];
+        }
+      })();
+      const cancelledReports = (() => {
+        try {
+          const key = getUserScopedHistoryKey('cancelledInterviewHistory', user);
+          const raw = JSON.parse(localStorage.getItem(key) || '[]');
           return Array.isArray(raw) ? raw : [];
         } catch {
           return [];
         }
       })();
 
-      const mergedReports = [...localSavedReports, ...serverReports].reduce((acc, report) => {
-        if (!report || !report._id && !report.reportId) return acc;
-        const key = String(report._id || report.reportId || '');
+      const mergedReports = [...localSavedReports, ...cancelledReports, ...serverReports].reduce((acc, report) => {
+        if (!report || (!report._id && !report.reportId && !report.roomId)) return acc;
+        if (isPlaceholderSession(report)) return acc;
+        const key = String(report._id || report.reportId || report.roomId || '');
         const normalizedReport = {
           ...report,
-          _id: report._id || report.reportId || key,
+          _id: report._id || report.reportId || report.roomId || key || `report_${Date.now()}`,
+          status: String(report.status || report.state || (report.cancelledAt ? 'cancelled' : 'completed')).toLowerCase(),
           title: report.title || report.interviewTitle || report.topic || report.problemTitle || 'Interview Report',
         };
 
-        if (key && !acc.some((item) => String(item._id || item.reportId || '') === key)) {
+        if (key && !acc.some((item) => String(item._id || item.reportId || item.roomId || '') === key)) {
           acc.push(normalizedReport);
         }
 
@@ -157,38 +171,115 @@ export const CandidateDashboard = () => {
     }
   };
 
+  const handleCancelInterview = async (interview) => {
+    const interviewId = interview?._id || interview?.roomId || interview?.sessionId;
+    if (!interviewId || !window.confirm(`Cancel this interview for ${interview?.title || 'your upcoming session'}?`)) {
+      return;
+    }
+
+    try {
+      const res = await API.put(`/interviews/${interviewId}/cancel`);
+      if (res.data.success) {
+        const cancelledEntry = {
+          _id: interviewId,
+          roomId: interview?.roomId || interviewId,
+          title: interview?.title || 'Interview Session',
+          status: 'cancelled',
+          cancelledAt: new Date().toISOString(),
+          candidateName: interview?.candidateName || user?.name || 'Candidate',
+          role: interview?.role || user?.role || 'Software Engineer',
+          cancellationMessage: 'This session was canceled by you.',
+          cancelReason: 'This session was canceled by you.',
+        };
+
+        const storedCancelled = (() => {
+          try {
+            const key = getUserScopedHistoryKey('cancelledInterviewHistory', user);
+            const raw = JSON.parse(localStorage.getItem(key) || '[]');
+            return Array.isArray(raw) ? raw : [];
+          } catch {
+            return [];
+          }
+        })();
+
+        const nextCancelled = [cancelledEntry, ...storedCancelled.filter((item) => String(item._id || item.roomId || '') !== String(interviewId))].slice(0, 20);
+        localStorage.setItem(getUserScopedHistoryKey('cancelledInterviewHistory', user), JSON.stringify(nextCancelled));
+        setPreviousInterviews((prev) => {
+          const deduped = [...prev.filter((item) => String(item?._id || item?.reportId || item?.roomId || '') !== String(interviewId)), cancelledEntry];
+          return deduped.slice(0, 20);
+        });
+        window.dispatchEvent(new CustomEvent('interviewReportUpdated'));
+
+        const nextState = removeCancelledInterviewFromState(interviews, [], interviewId);
+        setInterviews(nextState.interviews);
+        setToastMessage?.('Interview cancelled and removed from active sessions.');
+        setTimeout(() => setToastMessage?.(''), 4000);
+      }
+    } catch (error) {
+      console.error('Failed to cancel interview', error);
+      setToastMessage?.('Unable to cancel the interview right now.');
+      setTimeout(() => setToastMessage?.(''), 4000);
+    }
+  };
+
+  const refreshDashboardData = async () => {
+    try {
+      const [probRes, intRes] = await Promise.allSettled([
+        API.get('/problems'),
+        API.get('/interviews/my'),
+      ]);
+
+      if (probRes.status === 'fulfilled' && probRes.value.data.success) {
+        setProblems(probRes.value.data.data);
+      }
+
+      if (intRes.status === 'fulfilled' && intRes.value.data.success) {
+        const activeInterviews = Array.isArray(intRes.value.data.data)
+          ? intRes.value.data.data.filter(isSessionVisibleInUpcomingList)
+          : [];
+        setInterviews(activeInterviews);
+      }
+    } catch (e) {
+      console.warn('API connection offline, utilizing initial seed problem set.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     // Load streak data on mount
     setStreakData(calculateStreak());
-    
-    async function loadDashboardData() {
-      try {
-        const [probRes, intRes] = await Promise.allSettled([
-          API.get('/problems'),
-          API.get('/interviews/my'),
-        ]);
-
-        if (probRes.status === 'fulfilled' && probRes.value.data.success) {
-          setProblems(probRes.value.data.data);
-        }
-        if (intRes.status === 'fulfilled' && intRes.value.data.success) {
-          const activeInterviews = Array.isArray(intRes.value.data.data)
-            ? intRes.value.data.data.filter((interview) => {
-                const status = String(interview?.status ?? '').trim().toLowerCase();
-                return !['completed', 'finished', 'cancelled', 'ended', 'closed'].includes(status);
-              })
-            : [];
-          setInterviews(activeInterviews);
-        }
-      } catch (e) {
-        console.warn('API connection offline, utilizing initial seed problem set.');
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadDashboardData();
+    refreshDashboardData();
     fetchPreviousInterviews();
-  }, []);
+
+    const handleReportUpdate = () => {
+      refreshDashboardData();
+      fetchPreviousInterviews();
+    };
+
+    const handleInterviewScheduled = () => {
+      refreshDashboardData();
+    };
+
+    window.addEventListener('interviewReportUpdated', handleReportUpdate);
+    window.addEventListener('live-room-notification', handleInterviewScheduled);
+    window.addEventListener('notification-storage-sync', handleInterviewScheduled);
+    window.addEventListener('storage', handleInterviewScheduled);
+
+    if (socket) {
+      socket.on('interview-scheduled', handleInterviewScheduled);
+    }
+
+    return () => {
+      window.removeEventListener('interviewReportUpdated', handleReportUpdate);
+      window.removeEventListener('live-room-notification', handleInterviewScheduled);
+      window.removeEventListener('notification-storage-sync', handleInterviewScheduled);
+      window.removeEventListener('storage', handleInterviewScheduled);
+      if (socket) {
+        socket.off('interview-scheduled', handleInterviewScheduled);
+      }
+    };
+  }, [socket, user?.email]);
 
   const performanceMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const firstName = user?.name?.split(' ')[0] || 'Candidate';
@@ -209,11 +300,8 @@ export const CandidateDashboard = () => {
     localSolvedProgress: Number(localStorage.getItem('solvedProgress') || 0),
   });
   const completedInterviewRecords = [...(Array.isArray(interviews) ? interviews : []), ...(Array.isArray(previousInterviews) ? previousInterviews : [])].filter((entry) => {
-    if (!entry) return false;
-    const status = String(entry?.status || entry?.state || '').trim().toLowerCase();
-    const hasCompletedMarker = ['completed', 'finished'].includes(status);
-    const hasHistoricDate = !!(entry?.completedDate || entry?.interviewDate || entry?.endedAt || entry?.scheduledAt || entry?.completedAt || entry?.createdAt || entry?.startedAt || entry?.time);
-    return hasCompletedMarker || (hasHistoricDate && (status === '' || status === 'scheduled'));
+    if (!entry || isPlaceholderSession(entry)) return false;
+    return isHistoryStatusVisible(entry);
   });
   const interviewCount = completedInterviewRecords.length || Number(user?.stats?.interviewsCompleted || 0);
   const completionPercent = Math.min(100, Math.max(0, readinessScore));
@@ -376,6 +464,13 @@ export const CandidateDashboard = () => {
     if (score >= 80) return 'bg-emerald-100 text-emerald-700';
     if (score >= 60) return 'bg-amber-100 text-amber-700';
     return 'bg-rose-100 text-rose-700';
+  };
+
+  const formatReportDateTime = (value) => {
+    if (!value) return 'Not available';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    return parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
   };
 
   const openReport = (report) => {
@@ -613,7 +708,7 @@ export const CandidateDashboard = () => {
                 interviews.filter(isSessionVisibleInUpcomingList).map((item, idx) => {
                   const roomId = item.roomId || item.room || `room-${idx + 1}`;
                   const titleStr = item.title || 'Interview Session';
-                  const interviewerStr = item.interviewer || item.candidateName || 'Interview Team';
+                  const interviewerStr = item.interviewer || item.interviewerName || item.candidateName || 'Interview Team';
                   const durationStr = item.durationMinutes ? `${item.durationMinutes} Mins` : 'Scheduled';
                   const sessionId = item.sessionId || `sess_${item._id?.slice(-8) || 'pending'}`;
                   const isCompleted = item.status?.toLowerCase() === 'completed';
@@ -640,7 +735,24 @@ export const CandidateDashboard = () => {
                             {timerDisplay}
                           </span>
                         </div>
-                        <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Interviewer / Participant: {interviewerStr}</p>
+
+                        {/* Additional metadata: number of questions, interviewer name/email, scheduled date/time */}
+                        <div className="mt-1 text-xs space-y-0.5">
+                          <div className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                            Questions: <span className={`font-mono font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{item.problems?.length ?? item.questionCount ?? 'N/A'}</span>
+                          </div>
+                          <div className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                            Interviewer: <span className={`font-mono font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{item.interviewerName || item.interviewer || item.interviewerId?.name || 'TBD'}</span>
+                          </div>
+                          { (item.interviewerEmail || item.interviewerId?.email) && (
+                            <div className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                              Email: <span className={`font-mono ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{item.interviewerEmail || item.interviewerId?.email}</span>
+                            </div>
+                          ) }
+                          <div className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                            Scheduled: <span className={`font-mono ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{item.scheduledAt ? new Date(item.scheduledAt).toLocaleString() : (item.startTime ? new Date(item.startTime).toLocaleString() : 'Not scheduled')}</span>
+                          </div>
+                        </div>
                       </div>
 
                       {isCompleted ? (
@@ -651,12 +763,21 @@ export const CandidateDashboard = () => {
                           <Video className="w-3.5 h-3.5" /> View Recording
                         </button>
                       ) : (
-                        <Link
-                          to={`/live-room/${roomId}`}
-                          className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-600/20 transition-all"
-                        >
-                          <Video className="w-3.5 h-3.5" /> Join Live Room
-                        </Link>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleCancelInterview(item)}
+                            className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 text-xs font-semibold transition-all"
+                          >
+                            Cancel
+                          </button>
+                          <Link
+                            to={`/live-room/${roomId}`}
+                            className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-600/20 transition-all"
+                          >
+                            <Video className="w-3.5 h-3.5" /> Join Live Room
+                          </Link>
+                        </div>
                       )}
                     </div>
                   );
@@ -701,44 +822,72 @@ export const CandidateDashboard = () => {
                   No completed interviews have been saved yet. Your scorecards will appear here once a session is finished.
                 </div>
               ) : (
-                previousInterviews.map((report, index) => (
-                  <button
-                    key={report._id || report.reportId || index}
-                    type="button"
-                    onClick={() => openReport(report)}
-                    className={`w-full text-left p-4 rounded-xl border transition-all ${isDark ? 'bg-slate-900/80 border-slate-800 hover:border-purple-500/40' : 'bg-slate-50 border-slate-200 hover:border-purple-300'}`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 flex-wrap mb-2">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${isDark ? 'bg-emerald-500/20 text-emerald-400' : 'bg-emerald-100 text-emerald-700'}`}>
-                            Completed
-                          </span>
-                          <span className={`text-[10px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                            {report.completedDate || report.interviewDate || 'Recently'}
-                          </span>
-                        </div>
-                        <h4 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                          {report.title || report.interviewTitle || report.topic || report.problemTitle || 'Interview Report'}
-                        </h4>
-                        <div className={`mt-2 flex items-center gap-3 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                          <span>{report.duration || 'N/A'}</span>
-                          <span>•</span>
-                          <span>{report.questionsAsked || report.totalQuestions || 0} questions</span>
-                        </div>
-                      </div>
+                previousInterviews.map((report, index) => {
+                  const isCancelled = String(report.status || '').toLowerCase() === 'cancelled';
+                  const cancellationText = report.cancellationMessage || report.cancelReason || report.description || 'This session was canceled by you.';
+                  const interviewerName = resolveParticipantName(report, 'Interviewer');
+                  const interviewerEmail = resolveParticipantEmail(report, 'Not provided');
+                  const sessionDateTime = formatReportDateTime(report.completedDate || report.interviewDate || report.scheduledAt || report.createdAt || report.startedAt || report.time || report.cancelledAt || report.canceledAt);
+                  const totalQuestions = Number(report.questionsAsked || report.totalQuestions || report.questionMetrics?.length || 0);
 
-                      <div className="flex flex-col items-end gap-2">
-                        <div className={`px-3 py-1 rounded-lg text-sm font-bold ${Number(report.overallScore || 0) >= 80 ? 'bg-emerald-500 text-white' : Number(report.overallScore || 0) >= 60 ? 'bg-amber-500 text-white' : 'bg-slate-500 text-white'}`}>
-                          {report.overallScore || 0}%
+                  return (
+                    <button
+                      key={report._id || report.reportId || index}
+                      type="button"
+                      onClick={() => openReport(report)}
+                      className={`w-full text-left p-4 rounded-xl border transition-all ${isDark ? 'bg-slate-900/80 border-slate-800 hover:border-purple-500/40' : 'bg-slate-50 border-slate-200 hover:border-purple-300'}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 flex-wrap mb-2">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${isCancelled ? 'bg-rose-500/15 text-rose-600' : isDark ? 'bg-emerald-500/20 text-emerald-400' : 'bg-emerald-100 text-emerald-700'}`}>
+                              {isCancelled ? 'Cancelled' : 'Completed'}
+                            </span>
+                            <span className={`text-[10px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                              {sessionDateTime}
+                            </span>
+                          </div>
+                          <h4 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                            {report.title || report.interviewTitle || report.topic || report.problemTitle || 'Interview Report'}
+                          </h4>
+                          {isCancelled && (
+                            <p className={`mt-2 text-xs font-semibold ${isDark ? 'text-rose-400' : 'text-rose-600'}`}>
+                              {cancellationText}
+                            </p>
+                          )}
+
+                          <div className={`mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                            <div><span className="font-semibold uppercase tracking-wide">Interviewer:</span> {interviewerName}</div>
+                            <div><span className="font-semibold uppercase tracking-wide">Email:</span> {interviewerEmail}</div>
+                            <div><span className="font-semibold uppercase tracking-wide">Date/Time:</span> {sessionDateTime}</div>
+                            <div><span className="font-semibold uppercase tracking-wide">Questions:</span> {totalQuestions}</div>
+                          </div>
+
+                          <div className={`mt-2 flex items-center gap-3 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                            <span>{report.duration || 'N/A'}</span>
+                            <span>•</span>
+                            <span>{report.questionsAsked || report.totalQuestions || 0} questions</span>
+                          </div>
                         </div>
-                        <div className={`inline-flex items-center gap-1 text-[10px] font-medium ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                          <CheckCircle2 className="w-3 h-3 text-emerald-500" /> View Report
+
+                        <div className="flex flex-col items-end gap-2">
+                          {isCancelled ? (
+                            <div className="px-3 py-1 rounded-lg text-sm font-bold bg-rose-100 text-rose-700">Cancelled</div>
+                          ) : (
+                            <div className={`px-3 py-1 rounded-lg text-sm font-bold ${Number(report.overallScore || 0) >= 80 ? 'bg-emerald-500 text-white' : Number(report.overallScore || 0) >= 60 ? 'bg-amber-500 text-white' : 'bg-slate-500 text-white'}`}>
+                              {report.overallScore || 0}%
+                            </div>
+                          )}
+                          {!isCancelled && (
+                            <div className={`inline-flex items-center gap-1 text-[10px] font-medium ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                              <CheckCircle2 className="w-3 h-3 text-emerald-500" /> View Report
+                            </div>
+                          )}
                         </div>
                       </div>
-                    </div>
-                  </button>
-                ))
+                    </button>
+                  );
+                })
               )}
             </div>
           </div>
