@@ -106,6 +106,11 @@ export const InterviewerWelcomePage = () => {
   ];
 
   const interviewerStats = user?.stats || {};
+  const activeInterviewStatuses = ['scheduled', 'live', 'in-progress', 'in progress', 'active'];
+  const activeRoomsCount = interviews.filter((it) => {
+    const status = String(it.status || '').toLowerCase();
+    return activeInterviewStatuses.includes(status) || (!status || status === 'open');
+  }).length;
   const completedInterviews = interviews.filter((it) => ['completed', 'finished'].includes(String(it.status || '').toLowerCase()));
   const interviewsConducted = Number(interviewerStats.interviewsCompleted || completedInterviews.length || 0);
   const interviewHours = Number(interviewerStats.totalHours || (completedInterviews.reduce((sum, it) => sum + (Number(it.durationMinutes || 0) || 0), 0) / 60) || 0);
@@ -146,7 +151,7 @@ export const InterviewerWelcomePage = () => {
                 <div className="bg-white rounded-[18px] p-6 text-center">
                   <Video className="w-12 h-12 mx-auto text-indigo-600 mb-3" />
                   <div className="text-sm text-slate-500">Active Rooms</div>
-                  <div className="text-2xl font-bold text-slate-900 mt-2">{user?.stats?.activeRooms ?? 2}</div>
+                  <div className="text-2xl font-bold text-slate-900 mt-2">{activeRoomsCount}</div>
                   <div className="text-xs text-slate-400 mt-1">Start a session or join scheduled interviews</div>
                 </div>
               </div>

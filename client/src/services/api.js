@@ -1,10 +1,21 @@
 import axios from 'axios';
 
+const pickFirstValidUrl = (value) => {
+  if (!value) return '';
+
+  const candidates = value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  return candidates[0] || '';
+};
+
 const normalizeApiBaseUrl = (value) => {
-  if (!value) return '/api';
+  const selectedValue = pickFirstValidUrl(value);
+  if (!selectedValue) return '/api';
 
-  const trimmed = value.trim().replace(/\/$/, '');
-
+  const trimmed = selectedValue.replace(/\/$/, '');
   if (trimmed.endsWith('/api')) return trimmed;
 
   if (/^https?:\/\//i.test(trimmed)) {

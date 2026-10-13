@@ -25,6 +25,42 @@ export const getUsers = async (req, res, next) => {
   }
 };
 
+export const getCandidateUsers = async (req, res, next) => {
+  const sendError = (payload) => {
+    if (typeof res.status === 'function') {
+      return res.status(500).json(payload);
+    }
+    return res.json(payload);
+  };
+
+  try {
+    const users = await User.find({ role: 'candidate' })
+      .select('-password')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({
+      success: true,
+      count: users.length,
+      data: users.map((user) => ({
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        title: user.title,
+        role: user.role,
+      })),
+    });
+  } catch (error) {
+    console.error('Failed to load candidate users:', error.message);
+    return sendError({
+      success: false,
+      message: 'Unable to load candidate users.',
+      count: 0,
+      data: [],
+    });
+  }
+};
+
 import mongoose from 'mongoose';
 
 export const updateUserRole = async (req, res, next) => {

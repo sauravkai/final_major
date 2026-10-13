@@ -18,8 +18,11 @@ export const ChatPanel = ({ roomId, messages = [], onMessagesChange = () => {} }
   const [chatMessages, setChatMessages] = useState(messages.length ? messages : []);
 
   useEffect(() => {
-    if (messages.length) {
-      setChatMessages(messages);
+    if (messages?.length) {
+      setChatMessages((prev) => {
+        const incoming = messages.filter((entry) => !prev.some((item) => item.id === entry.id));
+        return incoming.length ? [...prev, ...incoming] : prev;
+      });
     }
   }, [messages]);
 
@@ -28,12 +31,13 @@ export const ChatPanel = ({ roomId, messages = [], onMessagesChange = () => {} }
   }, [chatMessages, onMessagesChange]);
 
   const addMessage = useCallback((msg) => {
-    if (!msg?.text) return;
+    const normalizedText = msg?.text ?? msg?.message;
+    if (!normalizedText) return;
 
     setChatMessages((prev) => {
-      const alreadyExists = prev.some((entry) => entry.id === msg.id);
+      const alreadyExists = prev.some((entry) => entry.id === msg.id || (entry.text === normalizedText && entry.sender === msg.sender && entry.timestamp === msg.timestamp));
       if (alreadyExists) return prev;
-      return [...prev, msg];
+      return [...prev, { ...msg, text: normalizedText }];
     });
   }, []);
 
@@ -56,14 +60,34 @@ export const ChatPanel = ({ roomId, messages = [], onMessagesChange = () => {} }
     if (!socket) return;
 
     const handleIncomingMessage = (msg) => {
-      const normalizedMessage = buildChatMessage(msg?.text || '', msg?.sender || 'Anonymous', msg?.role || 'candidate', msg?.id);
+      const payload = msg || {};
+      const normalizedMessage = buildChatMessage(
+        payload?.text ?? payload?.message ?? '',
+        payload?.sender || payload?.user?.name || 'Anonymous',
+        payload?.role || payload?.user?.role || 'candidate',
+        payload?.id
+      );
       addMessage(normalizedMessage);
     };
 
+    const handleRoomChatHistory = ({ messages = [] }) => {
+      messages.forEach((entry) => {
+        const normalized = buildChatMessage(
+          entry?.text ?? entry?.message ?? '',
+          entry?.sender || entry?.user?.name || 'Anonymous',
+          entry?.role || entry?.user?.role || 'candidate',
+          entry?.id
+        );
+        addMessage(normalized);
+      });
+    };
+
     socket.on('new-chat-message', handleIncomingMessage);
+    socket.on('room-chat-history', handleRoomChatHistory);
 
     return () => {
       socket.off('new-chat-message', handleIncomingMessage);
+      socket.off('room-chat-history', handleRoomChatHistory);
     };
   }, [socket, addMessage]);
 
@@ -83,6 +107,8 @@ export const ChatPanel = ({ roomId, messages = [], onMessagesChange = () => {} }
     socket.emit('send-chat-message', {
       roomId,
       message: trimmed,
+      sender: user?.name || 'You',
+      role: user?.role || 'candidate',
       user,
       messageId: localMessage.id,
     });

@@ -7,6 +7,8 @@ import { Interview } from '../models/Interview.js';
 import { config } from '../config/env.js';
 import { sendPasswordResetEmail } from '../services/emailService.js';
 
+export const normalizeEmail = (email) => String(email ?? '').trim().toLowerCase();
+
 const generateToken = (user) => {
   return jwt.sign(
     { id: user._id, email: user.email, role: user.role, name: user.name },
@@ -64,18 +66,19 @@ export const demoLogin = async (req, res, next) => {
 export const register = async (req, res, next) => {
   try {
     const { name, email, password, role } = req.body;
+    const normalizedEmail = normalizeEmail(email);
     const normalizedRole = ['candidate', 'interviewer', 'admin'].includes(String(role || '').trim().toLowerCase())
       ? String(role).trim().toLowerCase()
       : 'candidate';
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
       return res.status(400).json({ success: false, message: 'User already exists with this email' });
     }
 
     const user = await User.create({
       name,
-      email,
+      email: normalizedEmail,
       password,
       role: normalizedRole,
     });
@@ -106,12 +109,13 @@ export const register = async (req, res, next) => {
 export const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
+    const normalizedEmail = normalizeEmail(email);
 
-    if (!email || !password) {
+    if (!normalizedEmail || !password) {
       return res.status(400).json({ success: false, message: 'Please provide email and password' });
     }
 
-    const user = await User.findOne({ email }).select('+password');
+    const user = await User.findOne({ email: normalizedEmail }).select('+password');
     if (!user) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
@@ -163,7 +167,7 @@ import mongoose from 'mongoose';
 
 export const forgotPassword = async (req, res, next) => {
   try {
-    const email = String(req.body?.email || '').trim().toLowerCase();
+    const email = normalizeEmail(req.body?.email);
 
     if (!email) {
       return res.status(400).json({

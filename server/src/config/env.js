@@ -12,7 +12,7 @@ if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'ai_i
 }
 
 // Parse allowed CORS origins
-const rawAllowedOrigins = process.env.ALLOWED_ORIGINS || process.env.CLIENT_URL || 'http://localhost:5173,http://localhost:3001';
+const rawAllowedOrigins = process.env.ALLOWED_ORIGINS || process.env.CLIENT_URL || 'http://localhost:5173,http://localhost:3001,http://localhost:3002,http://localhost:3003';
 const allowedOrigins = rawAllowedOrigins.split(',').map((o) => o.trim()).filter(Boolean);
 
 const defaultMongoDatabase = 'ai-interview-platform';
@@ -60,7 +60,7 @@ export const config = {
   clientUrl: process.env.CLIENT_URL || (allowedOrigins[0] || 'http://localhost:3001'),
   allowedOrigins,
   allowDemoLogin: process.env.ALLOW_DEMO_LOGIN === 'true' || !isProduction,
-  serveStatic: process.env.SERVE_STATIC === 'true' || isProduction,
+  serveStatic: process.env.SERVE_STATIC === undefined ? isProduction : process.env.SERVE_STATIC === 'true',
   maxCodeLength: parseInt(process.env.MAX_CODE_LENGTH || '65536', 10), // 64KB max submission
 };
 

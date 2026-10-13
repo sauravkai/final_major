@@ -1,4 +1,7 @@
 const STORAGE_KEY = 'interview_ai_notifications';
+const SCHEDULED_INTERVIEWS_KEY = 'interview_ai_scheduled_sessions';
+
+const normalizeEmail = (value = '') => String(value || '').trim().toLowerCase();
 
 const normalizeEmail = (value = '') => String(value || '').trim().toLowerCase();
 
@@ -35,6 +38,65 @@ export const getNotificationsForUser = (userEmail = '') => {
   });
 };
 
+export const getStoredScheduledInterviews = () => {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = localStorage.getItem(SCHEDULED_INTERVIEWS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.warn('Unable to load scheduled interviews from storage.', error);
+    return [];
+  }
+};
+
+export const getScheduledInterviewsForUser = (userEmail = '', userName = '') => {
+  const normalizedEmail = normalizeEmail(userEmail);
+  const normalizedName = String(userName || '').trim().toLowerCase();
+  const interviews = getStoredScheduledInterviews();
+
+  if (!normalizedEmail && !normalizedName) return interviews;
+
+  return interviews.filter((item) => {
+    const emailMatches = [
+      item?.candidateEmail,
+      item?.interviewerEmail,
+      item?.email,
+      item?.userEmail,
+    ].some((candidate) => normalizeEmail(candidate) === normalizedEmail);
+
+    const nameMatches = [
+      item?.candidateName,
+      item?.interviewerName,
+      item?.name,
+      item?.userName,
+    ].some((candidate) => String(candidate || '').trim().toLowerCase() === normalizedName);
+
+    return emailMatches || nameMatches;
+  });
+};
+
+export const saveScheduledInterviewForUser = (interview = []) => {
+  if (!interview || typeof interview !== 'object') return [];
+
+  const normalizedInterview = {
+    ...interview,
+    roomId: interview.roomId || interview._id || `room-${Date.now()}`,
+    status: interview.status || 'scheduled',
+    scheduledAt: interview.scheduledAt || new Date().toISOString(),
+  };
+
+  const existing = getStoredScheduledInterviews();
+  const next = [normalizedInterview, ...existing.filter((item) => String(item?.roomId || item?._id || '') !== String(normalizedInterview.roomId))].slice(0, 50);
+
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(SCHEDULED_INTERVIEWS_KEY, JSON.stringify(next));
+  }
+
+  return next;
+};
+
 export const addLiveRoomNotification = (roomId, details = {}) => {
   if (!roomId || typeof window === 'undefined') return null;
 
@@ -64,6 +126,19 @@ export const addLiveRoomNotification = (roomId, details = {}) => {
     if (!normalizedRecipientEmail) return false;
     return normalizeEmail(item.recipientEmail || item.candidateEmail || item.email || item.userEmail) !== normalizedRecipientEmail;
   })].slice(0, 12);
+
+  if (details.recipientEmail || details.candidateEmail || details.email) {
+    saveScheduledInterviewForUser({
+      ...details,
+      roomId,
+      candidateEmail: details.candidateEmail || details.recipientEmail || details.email || '',
+      interviewerEmail: details.interviewerEmail || '',
+      candidateName: details.candidateName || '',
+      title: details.title || 'Live room invitation',
+      status: 'scheduled',
+      scheduledAt: new Date().toISOString(),
+    });
+  }
 
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 

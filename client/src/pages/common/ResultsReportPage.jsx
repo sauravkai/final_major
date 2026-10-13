@@ -285,13 +285,15 @@ export const ResultsReportPage = () => {
     }
   }, [reportId, passedReportData]);
 
+  const dashboardPath = '/interviewer/dashboard';
+
   return (
     <>
       <style>{printStyles}</style>
       <div ref={reportRootRef} className={`scorecard-page space-y-8 max-w-5xl mx-auto px-4 py-8 ${isDark ? 'bg-slate-950' : 'bg-white'}`}>
       {/* Back Navigation */}
       <div className="flex items-center justify-between">
-        <Link to="/dashboard" className={`flex items-center gap-2 text-xs transition-colors ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900'}`}>
+        <Link to={dashboardPath} className={`flex items-center gap-2 text-xs transition-colors ${isDark ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900'}`}>
           <ArrowLeft className="w-4 h-4" /> Back to Dashboard
         </Link>
         <div className="flex items-center gap-2">

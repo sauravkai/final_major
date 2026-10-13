@@ -92,30 +92,37 @@ export function resolveLearningStreak(rawStreak = null, now = new Date()) {
 }
 
 export function getSolvedHistoryKey(entry = {}) {
-  if (entry?.problemId) {
-    return `problem:${String(entry.problemId)}`;
+  const problemId = entry?.problemId ?? entry?.id ?? entry?.problem?.id ?? entry?.problem?._id;
+  if (problemId) {
+    return `problem:${String(problemId)}`;
   }
 
-  if (entry?.problemTitle) {
-    return `title:${String(entry.problemTitle).trim().toLowerCase()}`;
+  const title = entry?.problemTitle ?? entry?.title ?? entry?.name ?? entry?.problemTitle ?? '';
+  if (title) {
+    return `title:${String(title).trim().toLowerCase()}`;
   }
 
-  if (entry?.slug) {
-    return `slug:${String(entry.slug).trim().toLowerCase()}`;
+  const slug = entry?.slug ?? entry?.problem?.slug ?? '';
+  if (slug) {
+    return `slug:${String(slug).trim().toLowerCase()}`;
   }
 
-  return `fallback:${entry?.date || entry?.solvedAt || ''}`;
+  return `fallback:${String(entry?.date || entry?.solvedAt || '').trim()}`;
 }
 
 export function dedupeSolvedHistory(entries = []) {
   const seen = new Set();
 
   return (Array.isArray(entries) ? entries : []).filter((entry) => {
-    if (!entry || (!entry.problemId && !entry.problemTitle && !entry.slug)) {
+    if (!entry) {
       return false;
     }
 
     const key = getSolvedHistoryKey(entry);
+    if (!key || key.startsWith('fallback:') && !String(entry?.date || entry?.solvedAt || '').trim()) {
+      return false;
+    }
+
     if (seen.has(key)) {
       return false;
     }
@@ -149,12 +156,12 @@ export function getCanonicalSolvedCount({ user, solvedHistory = [], localSolvedP
   const historyCount = uniqueHistory.length;
   const localCount = Number(localSolvedProgress || 0);
 
-  if (statCount > 0) {
-    return Math.max(statCount, historyCount);
+  if (Number.isFinite(statCount) && statCount > 0) {
+    return statCount;
   }
 
   if (historyCount > 0) {
-    return Math.max(historyCount, Math.min(localCount, historyCount));
+    return historyCount;
   }
 
   return Math.max(0, localCount);

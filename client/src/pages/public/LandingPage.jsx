@@ -17,6 +17,7 @@ export const LandingPage = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [selectedCompany, setSelectedCompany] = useState('All');
   const [isPlaying, setIsPlaying] = useState(false);
+  const reduceMotion = true;
 
   // Use icons directly (imports expected to be available)
   const SunIcon = Sun;
@@ -82,7 +83,7 @@ export const LandingPage = () => {
 
   const handleRunCode = () => {
     setIsRunning(true);
-    setTimeout(() => setIsRunning(false), 2000);
+    setTimeout(() => setIsRunning(false), 150);
   };
 
   const handleCheckout = async (plan) => {
@@ -185,20 +186,20 @@ export const LandingPage = () => {
       <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(99,102,241,0.08),_transparent_30%),radial-gradient(circle_at_bottom_right,_rgba(168,85,247,0.08),_transparent_25%)]" />
         <motion.div
-          animate={{ scale: [1, 1.12, 1], opacity: [0.18, 0.3, 0.18] }}
-          transition={{ duration: 9, repeat: Infinity, ease: 'easeInOut' }}
+          animate={reduceMotion ? { scale: 1, opacity: 0.18 } : { scale: [1, 1.12, 1], opacity: [0.18, 0.3, 0.18] }}
+          transition={reduceMotion ? { duration: 0 } : { duration: 9, repeat: Infinity, ease: 'easeInOut' }}
           className="absolute top-20 left-10 w-72 h-72 rounded-full bg-violet-200/60 blur-3xl"
         />
         <motion.div
-          animate={{ scale: [1, 1.14, 1], opacity: [0.12, 0.2, 0.12] }}
-          transition={{ duration: 11, repeat: Infinity, ease: 'easeInOut' }}
+          animate={reduceMotion ? { scale: 1, opacity: 0.12 } : { scale: [1, 1.14, 1], opacity: [0.12, 0.2, 0.12] }}
+          transition={reduceMotion ? { duration: 0 } : { duration: 11, repeat: Infinity, ease: 'easeInOut' }}
           className="absolute bottom-8 right-10 w-96 h-96 rounded-full bg-indigo-200/60 blur-3xl"
         />
       </div>
       {/* Combined Header & Hero Section */}
       <motion.section 
-        initial="hidden"
-        animate="visible"
+        initial={reduceMotion ? false : 'hidden'}
+        animate={reduceMotion ? undefined : 'visible'}
         variants={containerVariants}
         className={`relative z-10 ${isDark ? 'bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950' : 'bg-white'} border-b ${isDark ? 'border-slate-800' : 'border-slate-200'}`}
       >

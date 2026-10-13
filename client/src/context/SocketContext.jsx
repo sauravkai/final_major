@@ -1,16 +1,8 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
+import { normalizeSocketUrl } from '../utils/socketUrl';
 
 const SocketContext = createContext();
-
-const normalizeSocketUrl = (value, apiValue) => {
-  const candidate = value || apiValue || window.location.origin;
-  if (!candidate) return window.location.origin;
-
-  const trimmed = candidate.trim().replace(/\/$/, '');
-  if (trimmed.endsWith('/api')) return trimmed.replace(/\/api$/, '');
-  return trimmed;
-};
 
 export const SocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
@@ -25,10 +17,12 @@ export const SocketProvider = ({ children }) => {
 
     const newSocket = io(socketUrl, {
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      reconnectionDelay: 2000,
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1500,
       reconnectionDelayMax: 10000,
       timeout: 20000,
+      forceNew: true,
     });
 
     newSocket.on('connect', () => {
@@ -39,8 +33,9 @@ export const SocketProvider = ({ children }) => {
       setIsConnected(false);
     });
 
-    newSocket.on('connect_error', () => {
+    newSocket.on('connect_error', (error) => {
       setIsConnected(false);
+      console.warn('[Socket] connection error:', error?.message || 'Unknown socket error');
     });
 
     setSocket(newSocket);

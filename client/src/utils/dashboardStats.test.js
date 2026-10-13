@@ -36,3 +36,16 @@ test('deduplicates repeated accepted attempts for the same problem when local hi
 
   assert.equal(count, 1);
 });
+
+test('deduplicates same-problem entries even when one version stores the id and another stores only the title', () => {
+  const count = getCanonicalSolvedCount({
+    user: { stats: { problemsSolved: 1 } },
+    solvedHistory: [
+      { problemId: 'p-42', problemTitle: 'Two Sum', date: '2024-01-01', solvedAt: '2024-01-01T09:00:00.000Z' },
+      { title: 'Two Sum', date: '2024-01-02', solvedAt: '2024-01-02T09:00:00.000Z' },
+    ],
+    localSolvedProgress: 2,
+  });
+
+  assert.equal(count, 1);
+});
